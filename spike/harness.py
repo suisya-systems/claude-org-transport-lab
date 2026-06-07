@@ -75,9 +75,11 @@ class SpikeSession:
         self.broker.start()
         log(f"broker listening on {self.broker.url}")
         # 観測用エージェント (pane なし)。token 帰属検証の対向に使う。
+        # MCP を経由しない server-side 合成エージェントなので明示登録する
         self.observer_token = self.broker.issue_token(
             OBSERVER_ID, OBSERVER_ID, "secretary"
         )
+        self.broker.register_local(self.observer_token)
 
     def spawn_claude(self) -> None:
         """中立 scratch dir で対話型 Claude TUI を WezTerm 新規ウィンドウに spawn。"""

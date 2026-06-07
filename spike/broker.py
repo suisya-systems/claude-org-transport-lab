@@ -168,6 +168,14 @@ class Broker:
         with self._lock:
             self._binds[token].pane_id = pane_id
 
+    def register_local(self, token: str) -> None:
+        """MCP を経由しない server-side 合成エージェント (検証用 observer 等) を
+        登録済みにする。実エージェントの登録は initialize 到達でのみ行う。"""
+        with self._lock:
+            bind = self._binds[token]
+            bind.registered = True
+            bind.registered_at = time.time()
+
     def mcp_config_for(self, token: str, server_name: str = "org-broker") -> dict:
         """--mcp-config に渡す JSON。token は static headers に埋める (確定事項 (2))。
 
@@ -211,7 +219,9 @@ class Broker:
         with self._lock:
             target: AgentBind | None = None
             for b in self._binds.values():
-                if b.revoked:
+                # registered な bind のみ配送先にする (未接続 / DELETE 済み
+                # client への配送を防ぐ。codex review round 3 Major 対応)
+                if b.revoked or not b.registered:
                     continue
                 if b.agent_id == to_id or b.name == to_id:
                     target = b
@@ -255,13 +265,18 @@ class Broker:
         if self.adapter is None or target.pane_id is None:
             return
         key = target.agent_id
-        existing = self._nudge_threads.get(key)
-        if existing and existing.is_alive():
-            return  # 配達スレッドが既に走っている (冪等性)
-        t = threading.Thread(
-            target=self._nudge_worker, args=(target,), name=f"nudge-{key}", daemon=True
-        )
-        self._nudge_threads[key] = t
+        # check-and-set はロック下で行う: ThreadingHTTPServer 配下で同一宛先へ
+        # 並行 send_message された場合の nudge worker 二重起動 (= NUDGE_TEXT
+        # 二重注入) を防ぐ (codex review round 3 Major 対応)
+        with self._lock:
+            existing = self._nudge_threads.get(key)
+            if existing and existing.is_alive():
+                return  # 配達スレッドが既に走っている (冪等性)
+            t = threading.Thread(
+                target=self._nudge_worker, args=(target,),
+                name=f"nudge-{key}", daemon=True,
+            )
+            self._nudge_threads[key] = t
         t.start()
 
     def _nudge_worker(self, target: AgentBind) -> None:
@@ -388,6 +403,9 @@ class _McpHandler(BaseHTTPRequestHandler):
         with self.broker._lock:
             if bind.session_id is not None and sid == bind.session_id:
                 bind.session_id = None
+                # 登録も落とす: 切断済み client を list_peers / 配送先に
+                # 残さない (codex review round 3 Major 対応)
+                bind.registered = False
                 closed = True
         if not closed:
             self._send_json(404, None)
