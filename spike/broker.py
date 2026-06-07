@@ -371,7 +371,12 @@ class _McpHandler(BaseHTTPRequestHandler):
         self._send_json(405, None)
 
     def do_DELETE(self):
-        """セッション終了: 当該 bind の session を失効させる。"""
+        """セッション終了: 当該 bind の session を失効させる。
+
+        POST 側と対称に、session 不一致 / 欠落は 404 で拒否する
+        (codex review round 2 Major 対応)。_journal はロック外で呼ぶ
+        (非再入 Lock の二重取得デッドロック回避。同 round Blocker 対応)。
+        """
         auth = self.headers.get("Authorization", "")
         token = auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else ""
         bind = self.broker.get_bind(token)
@@ -379,10 +384,15 @@ class _McpHandler(BaseHTTPRequestHandler):
             self._send_json(401, None)
             return
         sid = self.headers.get("Mcp-Session-Id")
+        closed = False
         with self.broker._lock:
             if bind.session_id is not None and sid == bind.session_id:
                 bind.session_id = None
-                self.broker._journal("session_closed", agent_id=bind.agent_id)
+                closed = True
+        if not closed:
+            self._send_json(404, None)
+            return
+        self.broker._journal("session_closed", agent_id=bind.agent_id)
         self._send_json(200, None)
 
     def do_POST(self):

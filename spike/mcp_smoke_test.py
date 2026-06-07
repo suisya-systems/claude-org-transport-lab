@@ -27,17 +27,18 @@ class MiniMcpClient:
         self.session_id: str | None = None
         self._id = 0
 
-    def _post(self, payload: dict, expect_status: int = 200):
+    def _post(self, payload: dict | None, expect_status: int = 200,
+              method: str = "POST"):
         req = urllib.request.Request(
             self.url,
-            data=json.dumps(payload).encode("utf-8"),
+            data=json.dumps(payload).encode("utf-8") if payload is not None else None,
             headers={
                 "Content-Type": "application/json",
                 "Accept": "application/json, text/event-stream",
                 "Authorization": f"Bearer {self.token}",
                 **({"Mcp-Session-Id": self.session_id} if self.session_id else {}),
             },
-            method="POST",
+            method=method,
         )
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
@@ -61,6 +62,9 @@ class MiniMcpClient:
 
     def notify(self, method: str):
         self._post({"jsonrpc": "2.0", "method": method}, expect_status=202)
+
+    def delete(self, expect_status: int = 200):
+        self._post(None, expect_status=expect_status, method="DELETE")
 
     def call_tool(self, name: str, args: dict | None = None) -> dict:
         res = self.rpc("tools/call", {"name": name, "arguments": args or {}})
@@ -158,6 +162,21 @@ def main() -> int:
         c.session_id = "bogus-session"
         resp = c.rpc("tools/list", expect_status=404)
         check("session 不一致 -> 404", "session_invalid" in resp["error"]["message"])
+
+        print("[8] DELETE による session 失効")
+        good_sid = b.session_id
+        b.session_id = "bogus-session"
+        b.delete(expect_status=404)
+        check("DELETE session 不一致 -> 404 (失効しない)", True)
+        b.session_id = good_sid
+        b.delete(expect_status=200)  # 旧実装はここでデッドロックしていた
+        check("DELETE 正規 session -> 200", True)
+        resp = b.rpc("tools/list", expect_status=404)
+        check("DELETE 後の呼出 -> 404 (失効済み)",
+              "session_invalid" in resp["error"]["message"])
+        b.rpc("initialize", {"protocolVersion": "2025-06-18"})
+        good = b.rpc("tools/list")
+        check("再 initialize で復帰", "result" in good)
     finally:
         broker.stop()
 

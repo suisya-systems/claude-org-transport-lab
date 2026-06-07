@@ -109,21 +109,24 @@ def main() -> int:
             record("AC-2-2", False, f"未到達 or 帰属不正: {got}")
 
         # ---- 一往復の閉じ: observer → nudge → check_messages --------------
+        # journal は append-only で過去 run の分が残るため、今回 run の
+        # イベントのみを enqueue 前の長さ n0 からのスライスで判定する
+        # (codex review round 2 Major 対応: 全履歴走査は再実行で偽陽性)
         s.wait_state("idle", timeout=60)
+        n0 = len(s.journal_events())
         sent = s.observer_send("REPLY-AC2: broker queue 経由の本文 (PTY 非経由)")
         drained = False
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
-            ev = [e["event"] for e in s.journal_events()]
-            if "queue_drained" in ev and any(
-                e["event"] == "queue_drained" and e["agent_id"] == AGENT_ID
-                for e in s.journal_events()
+            if any(
+                e["event"] == "queue_drained" and e.get("agent_id") == AGENT_ID
+                for e in s.journal_events()[n0:]
             ):
                 drained = True
                 break
             time.sleep(2)
         (OUT / "screen-after-nudge.txt").write_text(s.screen(), encoding="utf-8")
-        nudge_ev = [e for e in s.journal_events() if e["event"].startswith("nudge")]
+        nudge_ev = [e for e in s.journal_events()[n0:] if e["event"].startswith("nudge")]
         record(
             "AC-2-roundtrip", drained,
             f"ナッジ→check_messages 一往復 {'成立' if drained else '不成立'} "

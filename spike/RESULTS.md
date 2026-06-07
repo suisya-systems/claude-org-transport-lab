@@ -5,10 +5,10 @@
   Claude Code 2.1.168 / Python 3.14.5 / 検証モデル: Sonnet 4.6
 - 判定スクリプト: `run_ac2.py` (02:54 run) / `run_ac1.py` (02:54 run)。
   機械可読の生データは `broker-state/{ac2,ac1}/result.json` (git 管理外、再実行で再生成可)
-- codex セルフレビュー round 1 の指摘 (Blocker 1 / Major 2) 修正後の再実行で全項目 GO を再確認済み:
-  - state4 早漏配達判定を「観測時点の状態」→「nudge_sent イベント ts と busy 終了時刻の比較」に修正 (Blocker)
-  - broker に Mcp-Session-Id 検証 / DELETE 失効を実装 — 実 Claude クライアントは session header を正しく往復し接続チェーンは GO のまま (Major)
-  - tools/call の引数欠落を -32602 invalid params で応答 (Major)
+- codex セルフレビュー round 1 (Blocker 1 / Major 2 / Minor 1 / Nit 1)・round 2
+  (Blocker 1 / Major 2 / Minor 1) の全指摘を修正し、各 round 後の再実行で全項目 GO を再確認済み:
+  - round 1: state4 早漏配達判定を「観測時点の状態」→「nudge_sent イベント ts と busy 終了時刻の比較」に修正 (Blocker)。broker に Mcp-Session-Id 検証を実装 — 実 Claude クライアントは session header を正しく往復し接続チェーンは GO のまま (Major)。tools/call の引数欠落を -32602 で応答 (Major)
+  - round 2: DELETE ハンドラのロック内 _journal 呼出によるデッドロックを解消 (Blocker)。DELETE の session 不一致を 404 に統一 (Major)。AC-2-roundtrip 判定を今回 run のイベントのみに限定 — append-only journal の過去 run 残留による偽陽性排除 (Major)。smoke test に DELETE 失効回帰チェックを追加 (Minor)
 
 ## AC-2: 起動・接続チェーンの置き換え成立 — **総合 GO**
 
