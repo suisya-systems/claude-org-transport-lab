@@ -1,0 +1,3 @@
+# broker queue store / 画面ダンプ等の実行時生成物 (再実行で再生成可)
+broker-state/
+__pycache__/
