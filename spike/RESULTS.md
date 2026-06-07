@@ -10,7 +10,9 @@
   - round 1: state4 早漏配達判定を「観測時点の状態」→「nudge_sent イベント ts と busy 終了時刻の比較」に修正 (Blocker)。broker に Mcp-Session-Id 検証を実装 — 実 Claude クライアントは session header を正しく往復し接続チェーンは GO のまま (Major)。tools/call の引数欠落を -32602 で応答 (Major)
   - round 2: DELETE ハンドラのロック内 _journal 呼出によるデッドロックを解消 (Blocker)。DELETE の session 不一致を 404 に統一 (Major)。AC-2-roundtrip 判定を今回 run のイベントのみに限定 — append-only journal の過去 run 残留による偽陽性排除 (Major)。smoke test に DELETE 失効回帰チェックを追加 (Minor)
   - round 3: DELETE で registered も落とし、未接続 / 切断済み client を list_peers・配送先から除外 (Major)。nudge worker の check-and-set をロック下に移し、並行 send_message での NUDGE_TEXT 二重注入を排除 (Major)
-  - round 4: 残存 Blocker / Major なしを確認 (クローズ)
+  - レビューは brief の 3 ラウンド上限で打ち切り (窓口指示)。round 3 指摘の修正は
+    commit 済み・全検証 green 再確認済みだが、**round 3 修正分への追レビューは未実施**
+    (既知制限として記録)
 
 ## AC-2: 起動・接続チェーンの置き換え成立 — **総合 GO**
 
