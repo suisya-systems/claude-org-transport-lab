@@ -157,10 +157,9 @@ class WezTermAdapter:
 # 画面状態ヒューリスティック (AC-1 自動判定の根拠)
 # ---------------------------------------------------------------------------
 
-# Claude Code TUI が応答生成中に表示する割り込みヒント
+# Claude Code TUI が応答生成中に表示する割り込みヒント (busy 判定はこの
+# 文字列のみで行う。スピナーグリフは点滅で取りこぼすため判定に使わない)
 _BUSY_MARKERS = ("esc to interrupt", "ctrl+c to stop", "esc to cancel")
-# スピナーのグリフ (Claude Code 2.x 系で観測される回転文字)
-_SPINNER_CHARS = set("✻✶✳✢·∗*+✽")
 
 
 def classify_pane_state(screen: str) -> str:

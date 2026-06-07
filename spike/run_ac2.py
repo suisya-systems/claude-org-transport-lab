@@ -73,9 +73,11 @@ def main() -> int:
         (OUT / "screen-mojibake.txt").write_text(scr, encoding="utf-8")
         intact = MOJIBAKE_PROBE in scr.replace("\n", "")  # 折返し跨ぎは結合で吸収
         if not intact:
-            # 折返しで分割された場合に備え、全文字の出現で再判定
-            flat = "".join(scr.split())
-            intact = all(ch in flat for ch in MOJIBAKE_PROBE)
+            # 折返しの padding 空白を除去し、連続部分文字列として再判定
+            # (文字の「どこかに出現」では順序・欠落を検出できないため不可。
+            #  codex review Minor 対応)
+            import re
+            intact = MOJIBAKE_PROBE in re.sub(r"\s+", "", scr)
         record(
             "AC-2-4", intact,
             f"probe='{MOJIBAKE_PROBE}' が入力欄に{'無傷で出現' if intact else '化け/欠落'}",

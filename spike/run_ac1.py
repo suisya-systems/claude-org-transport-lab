@@ -47,11 +47,12 @@ def events_since(s: SpikeSession, n0: int) -> list[dict]:
     return s.journal_events()[n0:]
 
 
-def wait_event(s: SpikeSession, n0: int, name: str, timeout: float = 90.0):
+def wait_event(s: SpikeSession, n0: int, name: str, timeout: float = 90.0, pred=None):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         for e in events_since(s, n0):
-            if e["event"] == name and e.get("agent_id") == AGENT_ID:
+            if (e["event"] == name and e.get("agent_id") == AGENT_ID
+                    and (pred is None or pred(e))):
                 return e
         time.sleep(1.0)
     return None
@@ -141,21 +142,29 @@ def main() -> int:
                    "busy (応答生成中) 状態を捕捉できなかった")
             return finish(s, 1)
         s.observer_send("STATE4: ストリーミング中 defer テスト本文")
-        defer_ev4 = wait_event(s, n0, "nudge_deferred", timeout=20)
-        premature4 = []
-        # 生成完了 (idle 復帰) まで早漏配達がないか監視
+        # 静止確認が busy を検知して defer したこと (state=busy の defer に限定)
+        defer_ev4 = wait_event(
+            s, n0, "nudge_deferred", timeout=20,
+            pred=lambda e: e.get("state") == "busy",
+        )
+        # 生成完了 (busy 解消) の時刻を記録する。早漏配達の判定は
+        # 「観測時点の状態」ではなく nudge_sent イベントの ts と busy 終了
+        # 時刻の比較で行う (codex review Blocker 対応: 観測時点フィルタでは
+        # busy 中の誤配達を idle 復帰後の journal 読みで見逃す)。
+        busy_end_wall: float | None = None
         deadline = time.monotonic() + 120
         while time.monotonic() < deadline:
-            evs = events_since(s, n0)
-            premature4 = [
-                e for e in evs
-                if e["event"] == "nudge_sent"
-                and s.state() == "busy"  # busy 中の配達のみ早漏とみなす
-            ]
-            if s.state() != "busy" or premature4:
+            if s.state() != "busy":
+                busy_end_wall = time.time()
                 break
-            time.sleep(1.0)
+            time.sleep(0.5)
         sent4 = wait_event(s, n0, "nudge_sent", timeout=90)
+        # 0.75s は busy 終了観測の poll 遅れ (0.5s 間隔) を吸収する許容幅
+        premature4 = [
+            e for e in events_since(s, n0)
+            if e["event"] == "nudge_sent" and e.get("agent_id") == AGENT_ID
+            and busy_end_wall is not None and e["ts"] < busy_end_wall - 0.75
+        ]
         drained4 = wait_event(s, n0, "queue_drained", timeout=120)
         time.sleep(2.0)
         scr4 = s.screen()
@@ -165,6 +174,7 @@ def main() -> int:
         output_intact = all(f"\n{n}" in flat for n in ("38", "39", "40"))
         ok = (
             bool(defer_ev4)
+            and busy_end_wall is not None
             and not premature4
             and bool(sent4)
             and bool(drained4)
@@ -172,7 +182,8 @@ def main() -> int:
         )
         record(
             "AC-1-state4-streaming", ok,
-            f"defer={bool(defer_ev4)}, busy 中の早漏配達={len(premature4)}件, "
+            f"defer(busy)={bool(defer_ev4)}, busy 終了観測={busy_end_wall is not None}, "
+            f"busy 中の早漏配達={len(premature4)}件 (ts 比較), "
             f"完了後配達={bool(sent4)}, drain={bool(drained4)} (取りこぼし無し), "
             f"出力末尾無傷={output_intact}",
         )

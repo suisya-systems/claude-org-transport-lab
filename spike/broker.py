@@ -64,6 +64,10 @@ TOOLS = [
 ]
 
 
+class ToolArgError(ValueError):
+    """tools/call の引数不正 (JSON-RPC -32602 invalid params に変換される)。"""
+
+
 @dataclass
 class AgentBind:
     """token ↔ agent/pane の bind (設計書 §4.4)。broker のみが保持する。"""
@@ -301,8 +305,12 @@ class Broker:
 
     # ------------------------------------------------------------- MCP tools
     def call_tool(self, bind: AgentBind, name: str, args: dict) -> dict:
+        """ツール実行。引数不正は ToolArgError (handler 側で -32602 に変換)。"""
         if name == "send_message":
-            result = self.enqueue(bind, args["to_id"], args["message"])
+            to_id, message = args.get("to_id"), args.get("message")
+            if not isinstance(to_id, str) or not isinstance(message, str):
+                raise ToolArgError("send_message requires string to_id and message")
+            result = self.enqueue(bind, to_id, message)
         elif name == "check_messages":
             result = {"messages": self.drain(bind)}
         elif name == "list_peers":
@@ -320,8 +328,11 @@ class Broker:
                     ]
                 }
         elif name == "set_summary":
+            summary = args.get("summary")
+            if not isinstance(summary, str):
+                raise ToolArgError("set_summary requires string summary")
             with self._lock:
-                bind.summary = args["summary"]
+                bind.summary = summary
             result = {"ok": True}
         else:
             return {
@@ -359,7 +370,19 @@ class _McpHandler(BaseHTTPRequestHandler):
     def do_GET(self):  # SSE ストリームは提供しない (POST 応答のみで完結)
         self._send_json(405, None)
 
-    def do_DELETE(self):  # セッション終了通知は受理のみ
+    def do_DELETE(self):
+        """セッション終了: 当該 bind の session を失効させる。"""
+        auth = self.headers.get("Authorization", "")
+        token = auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else ""
+        bind = self.broker.get_bind(token)
+        if bind is None:
+            self._send_json(401, None)
+            return
+        sid = self.headers.get("Mcp-Session-Id")
+        with self.broker._lock:
+            if bind.session_id is not None and sid == bind.session_id:
+                bind.session_id = None
+                self.broker._journal("session_closed", agent_id=bind.agent_id)
         self._send_json(200, None)
 
     def do_POST(self):
@@ -397,6 +420,28 @@ class _McpHandler(BaseHTTPRequestHandler):
 
         method = req.get("method", "")
         req_id = req.get("id")
+
+        # --- セッション検証 (initialize 以外は Mcp-Session-Id 必須) -------
+        # codex review Major 対応: bearer token のみで操作可能だと
+        # initialize 前 / DELETE 後の stale client を排除できない。
+        # 不一致は 404 (MCP spec: クライアントは再 initialize する)。
+        if method != "initialize":
+            sid = self.headers.get("Mcp-Session-Id")
+            with self.broker._lock:
+                expected = bind.session_id
+            if expected is None or sid != expected:
+                self._send_json(
+                    404,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {
+                            "code": -32001,
+                            "message": "[session_invalid] initialize first",
+                        },
+                    },
+                )
+                return
 
         # --- notification (id なし) は 202 で受理 ------------------------
         if req_id is None:
@@ -436,9 +481,20 @@ class _McpHandler(BaseHTTPRequestHandler):
             )
         elif method == "tools/call":
             params = req.get("params") or {}
-            result = self.broker.call_tool(
-                bind, params.get("name", ""), params.get("arguments") or {}
-            )
+            try:
+                result = self.broker.call_tool(
+                    bind, params.get("name", ""), params.get("arguments") or {}
+                )
+            except ToolArgError as e:
+                self._send_json(
+                    200,
+                    {
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "error": {"code": -32602, "message": f"invalid params: {e}"},
+                    },
+                )
+                return
             self._send_json(
                 200, {"jsonrpc": "2.0", "id": req_id, "result": result}
             )

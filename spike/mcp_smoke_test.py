@@ -136,12 +136,28 @@ def main() -> int:
         check("summary reflected",
               any(p["summary"] == "smoke testing" for p in peers))
 
-        print("[6] unknown method / unknown tool")
+        print("[6] unknown method / unknown tool / invalid params")
         um = a.rpc("nonexistent/method")
         check("unknown method -> JSON-RPC error", "error" in um)
         ut = a.rpc("tools/call", {"name": "spawn_agent", "arguments": {}})
         check("worker から非公開 tool は isError",
               ut["result"].get("isError") is True)
+        ip = a.rpc("tools/call", {"name": "send_message", "arguments": {}})
+        check("引数欠落 -> -32602 invalid params",
+              ip.get("error", {}).get("code") == -32602, str(ip)[:100])
+
+        print("[7] session 検証 (initialize 前 / 不一致は 404)")
+        c = MiniMcpClient(broker.url, broker.issue_token("agent-c", "agent-c", "worker"))
+        resp = c.rpc("tools/list", expect_status=404)
+        check("initialize 前の呼出 -> 404 [session_invalid]",
+              "session_invalid" in resp["error"]["message"])
+        c.rpc("initialize", {"protocolVersion": "2025-06-18"})
+        c.notify("notifications/initialized")
+        good = c.rpc("tools/list")
+        check("initialize 後は通る", "result" in good)
+        c.session_id = "bogus-session"
+        resp = c.rpc("tools/list", expect_status=404)
+        check("session 不一致 -> 404", "session_invalid" in resp["error"]["message"])
     finally:
         broker.stop()
 

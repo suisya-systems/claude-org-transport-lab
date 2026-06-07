@@ -3,8 +3,12 @@
 - 実施日: 2026-06-08
 - 環境: Windows 11 Pro (10.0.22631) / WezTerm 20240203-110809-5046fc22 /
   Claude Code 2.1.168 / Python 3.14.5 / 検証モデル: Sonnet 4.6
-- 判定スクリプト: `run_ac2.py` (02:28 run) / `run_ac1.py` (02:35 run)。
+- 判定スクリプト: `run_ac2.py` (02:54 run) / `run_ac1.py` (02:54 run)。
   機械可読の生データは `broker-state/{ac2,ac1}/result.json` (git 管理外、再実行で再生成可)
+- codex セルフレビュー round 1 の指摘 (Blocker 1 / Major 2) 修正後の再実行で全項目 GO を再確認済み:
+  - state4 早漏配達判定を「観測時点の状態」→「nudge_sent イベント ts と busy 終了時刻の比較」に修正 (Blocker)
+  - broker に Mcp-Session-Id 検証 / DELETE 失効を実装 — 実 Claude クライアントは session header を正しく往復し接続チェーンは GO のまま (Major)
+  - tools/call の引数欠落を -32602 invalid params で応答 (Major)
 
 ## AC-2: 起動・接続チェーンの置き換え成立 — **総合 GO**
 
@@ -28,7 +32,7 @@
 | 1 | idle | **GO** | defer 0 回で即時配達。ナッジが 1 メッセージとして履歴に出現し、画面・履歴に乱れなし。`check_messages` で本文取得まで成立 |
 | 2 | IME 変換中 | **手動待ち** | 自動化不能 (get-text は PTY 文字 grid のみ観測し IME 変換窓・候補 UI を観測できない)。手順書 [`manual-ime-test.md`](./manual-ime-test.md) 準備完了。実施は窓口 + ユーザー |
 | 3 | 長文入力中 (未送信複数行) | **GO** | 静止確認が `input_pending` を検知し defer (早漏配達 0 件)。未送信テキスト無傷・ナッジ混入なし・勝手送信なし。入力欄クリア後に配達され取りこぼしなし (defer-then-deliver 成立) |
-| 4 | 出力ストリーミング中 | **GO** | busy 中は defer (早漏配達 0 件)。出力末尾まで描画無傷。応答完了後にナッジ配達 → `check_messages` 成立 (入力キュー滞留での消失なし) |
+| 4 | 出力ストリーミング中 | **GO** | busy 中は defer (state=busy の defer を journal で確認)。早漏配達 0 件 (`nudge_sent` の ts と busy 終了時刻の比較で判定)。出力末尾まで描画無傷。応答完了後にナッジ配達 → `check_messages` 成立 (入力キュー滞留での消失なし) |
 
 判定ロジックの要点 (詳細は `run_ac1.py`):
 - 状態 3 / 4 は「きれいに注入できた」ではなく「**defer して静止後に配達し、
