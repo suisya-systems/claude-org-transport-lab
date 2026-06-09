@@ -220,6 +220,12 @@ class Broker:
                 self._queues.setdefault(agent_id, [])
             else:
                 self._queues[agent_id] = []
+                # 旧ライフサイクルの nudge thread エントリも破棄する: _trigger_nudge は
+                # _nudge_threads[agent_id] の is_alive() だけで二重起動を抑止するため、
+                # 旧 thread が終了直前 (旧 target inactive で return 途中) に残っていると、
+                # 新ライフサイクルの enqueue で nudge thread が起動されず未読が放置される
+                # (codex round 3 Major 対応)。新規ライフサイクルでは dedup キーを捨てる。
+                self._nudge_threads.pop(agent_id, None)
         self._journal(
             "token_issued", agent_id=agent_id, role=role, pane_id=pane_id,
             ttl=ttl,

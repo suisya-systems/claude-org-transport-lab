@@ -191,6 +191,35 @@ class AttributionTest(unittest.TestCase):
             self.assertTrue(res.get("isError"), f"{tool} が失効 bind で素通りした")
             self.assertIn("token_revoked", res["content"][0]["text"])
 
+    def test_reissue_clears_stale_nudge_thread(self) -> None:
+        # revoke→同 agent_id 再発行→enqueue が、旧 nudge thread 生存中でも新規
+        # nudge を起動できること (codex round 3 Major)。旧 thread を模した「生存中の
+        # ダミー thread」を _nudge_threads に差し込んで race を決定的に再現する。
+        import threading
+        broker = Broker(
+            state_dir=_SPIKE / "broker-state" / "ut" / "nudgethread",
+            adapter=FakeAdapter(), nudge_defer_interval=0.01,
+        )
+        adapter: FakeAdapter = broker.adapter  # type: ignore[assignment]
+        adapter.add_pane("%b", state="idle")
+        snd = broker.issue_token("snd", "snd", "worker")
+        broker.register_local(snd)
+        b1 = broker.issue_token("b", "b", "worker", pane_id="%b")
+        broker.register_local(b1)
+        stale = threading.Thread(target=lambda: time.sleep(0.5), daemon=True)
+        stale.start()
+        broker._nudge_threads["b"] = stale          # 旧ライフサイクルの生存 thread を模す
+        broker.revoke_token(b1, reason="suspend")
+        b2 = broker.issue_token("b", "b", "worker", pane_id="%b")  # 再発行
+        broker.register_local(b2)
+        res = broker.enqueue(broker.get_bind(snd), "b", "再発行後の新着")
+        self.assertTrue(res.get("ok"), res)
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and not adapter.nudges_for("%b"):
+            time.sleep(0.01)
+        self.assertEqual(adapter.nudges_for("%b"), [run_ac3.NUDGE_TEXT])
+        stale.join(timeout=1.0)
+
     def test_reissue_does_not_inherit_stale_queue(self) -> None:
         # agent-b 宛に未読を積んでから revoke → 同 agent_id で再発行した token が
         # 旧ライフサイクルの未読を読めないこと (codex Major 対応)
