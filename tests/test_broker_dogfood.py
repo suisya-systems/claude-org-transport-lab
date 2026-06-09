@@ -108,6 +108,8 @@ class HeadlessFlagGuardTest(unittest.TestCase):
         for good in (["claude"],
                      ["claude", "--model", "sonnet"],
                      ["claude", "--model", "sonnet", "--strict-mcp-config"],
+                     # 実 claude は絶対パス起動 (ps 実測) のため basename 判定で許可される
+                     ["/home/u/.local/bin/claude", "--model", "sonnet"],
                      ["claude", "--allowedTools", "mcp__org-broker__send_message",
                       "--permission-mode", "default"]):
             r = self.c.broker.spawn_agent("agent-ok", "agent-ok", "worker", good)

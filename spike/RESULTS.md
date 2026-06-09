@@ -452,6 +452,11 @@ Phase 1（WezTerm / Windows）と Phase 2（tmux / POSIX）の AC 判定を記�
      `_CLAUDE_TUI_BOOL_FLAGS`（値を取らない flag）に当該 flag 名を追加する。**headless 系
      （`-p`/`--print`/`--output-format`/`--input-format`/`--headless`）は決して allowlist に入れない**こと
      （課金中立の足切りが破れる）。追加後は `tests/test_broker_dogfood.py` の許可/拒否ケースを更新する。
+- **`argv[0]` は basename 判定（設計判断）**: 実 claude は絶対パス（`/home/.../.local/bin/claude`、AC-5 の ps 実測がこの形）で
+  起動されるため、`claude` / `/abs/claude` / `./claude` を許可する必要がある。完全一致にすると正規の絶対パス起動を
+  false-reject するため basename を採る。本 guard の脅威モデルは **trusted な dispatcher が組む argv の誤ヘッドレス化**
+  （defense-in-depth）であり、`claude` という名前の悪意ある wrapper を別パスに置く攻撃は対象外（codex self-review への
+  設計判断として記録）。
 - 本体（claude-org-runtime）取り込み時は、この allowlist を runtime 側の spawn 実装へ移植し、同じ保守契約を継承する。
 
 ### 既知制限（Phase 5 / AC-5）

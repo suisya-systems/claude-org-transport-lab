@@ -101,13 +101,20 @@ _CLAUDE_TUI_BOOL_FLAGS = frozenset((  # 値を取らない対話 flag
 def is_interactive_claude_argv(argv: list[str]) -> tuple[bool, str]:
     """token 注入 spawn 用の **対話 claude TUI allowlist 判定** (default-deny)。
 
-    argv[0] が claude かつ、以降の token が対話 flag allowlist (+ その値) のみで構成されることを要求する。
-    返り値: (ok, 拒否理由)。ok=False の理由は呼び手が `[headless_forbidden]` エラーに載せる。
+    argv[0] の basename が claude かつ、以降の token が対話 flag allowlist (+ その値) のみで構成される
+    ことを要求する。返り値: (ok, 拒否理由)。ok=False の理由は呼び手が `[headless_forbidden]` に載せる。
+
+    argv[0] は **basename 判定** (完全一致でない): 実 claude は絶対パス
+    (例 `/home/.../.local/bin/claude`、AC-5 の ps 実測がこの形) で起動されるため、`claude` /
+    `/abs/claude` / `./claude` を許可する必要がある。本 guard の脅威モデルは **trusted な dispatcher が
+    組む argv の誤ヘッドレス化** (defense-in-depth) であり、`claude` という名前の悪意ある wrapper を別パスに
+    置く攻撃は対象外 (それが可能な攻撃者には本 guard 以前の前提が崩れている)。完全一致にすると正規の
+    絶対パス起動を false-reject するため basename を採る (codex self-review への設計判断)。
     """
     if not argv:
         return False, "argv must be non-empty"
     if argv[0].rsplit("/", 1)[-1] != "claude":
-        return False, f"argv[0] must be 'claude' (got {argv[0]!r})"
+        return False, f"argv[0] basename must be 'claude' (got {argv[0]!r})"
     i = 1
     while i < len(argv):
         tok = argv[i]
