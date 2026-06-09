@@ -90,6 +90,46 @@ class TokenLifecycleTest(unittest.TestCase):
         self.assertFalse(adapter.pane_exists("%2"))
         self.assertEqual(self.broker.authorize(tok)[1], "token_revoked")
 
+    def test_close_pane_no_revoke_on_kill_exception(self) -> None:
+        # kill が例外 → live pane の可能性 → revoke しない (codex round 2 Minor)
+        class RaisingAdapter(FakeAdapter):
+            def kill_pane(self, pane_id):  # noqa: ANN001
+                raise RuntimeError("kill failed")
+        broker = Broker(state_dir=_SPIKE / "broker-state" / "ut" / "killraise",
+                        adapter=RaisingAdapter())
+        broker.adapter.add_pane("%x", state="idle")  # type: ignore[attr-defined]
+        tok = broker.issue_token("w", "w", "worker", pane_id="%x")
+        broker.register_local(tok)
+        self.assertEqual(broker.close_pane("%x"), [])
+        self.assertIsNone(broker.authorize(tok)[1])  # 失効していない
+
+    def test_close_pane_no_revoke_when_pane_survives(self) -> None:
+        # kill が例外を出さずとも pane が残存 → revoke しない (check=False 相当)
+        class NoopKillAdapter(FakeAdapter):
+            def kill_pane(self, pane_id):  # noqa: ANN001
+                pass  # pane を消さない
+        broker = Broker(state_dir=_SPIKE / "broker-state" / "ut" / "killnoop",
+                        adapter=NoopKillAdapter())
+        broker.adapter.add_pane("%x", state="idle")  # type: ignore[attr-defined]
+        tok = broker.issue_token("w", "w", "worker", pane_id="%x")
+        broker.register_local(tok)
+        self.assertEqual(broker.close_pane("%x"), [])
+        self.assertIsNone(broker.authorize(tok)[1])
+
+    def test_ttl_expiry_does_not_inherit_queue(self) -> None:
+        # TTL 失効は revoke_token を経ないため、再発行で旧キューを継承しないこと
+        # を別途検証する (codex round 2 Major-B)
+        sender = self.broker.issue_token("snd", "snd", "worker")
+        self.broker.register_local(sender)
+        b = self.broker.issue_token("b", "b", "worker", ttl=0.05)
+        self.broker.register_local(b)
+        self.broker.enqueue(self.broker.get_bind(sender), "b", "stale")
+        time.sleep(0.08)  # b が TTL 失効
+        self.assertEqual(self.broker.authorize(b)[1], "token_expired")
+        new_b = self.broker.issue_token("b", "b", "worker")  # resume 再発行
+        self.broker.register_local(new_b)
+        self.assertEqual(self.broker.drain(self.broker.get_bind(new_b)), [])
+
     def test_suspend_resume_reissue(self) -> None:
         old = self.broker.issue_token("s", "s", "secretary")
         self.broker.register_local(old)

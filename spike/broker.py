@@ -201,12 +201,25 @@ class Broker:
         now = time.time()
         token = secrets.token_urlsafe(32)
         with self._lock:
+            # 既存の有効 bind が他に無い agent_id への発行 = 新規ライフサイクルの
+            # 開始 (初回 spawn / 退役・TTL 失効後の resume 再発行)。この場合は旧
+            # ライフサイクルの未読キューを破棄して継承を断つ。TTL 失効は revoke_token
+            # を経ないため setdefault のままだと旧キューを引き継ぐ (codex round 2
+            # Major-B 対応)。有効 bind が他に在る場合 (同一 agent の追加 token) は
+            # 既存キューを尊重する。
+            had_active = any(
+                b.agent_id == agent_id and b.is_active(now)
+                for b in self._binds.values()
+            )
             self._binds[token] = AgentBind(
                 token=token, agent_id=agent_id, name=name, role=role, pane_id=pane_id,
                 issued_at=now,
                 expires_at=(now + ttl) if ttl is not None else None,
             )
-            self._queues.setdefault(agent_id, [])
+            if had_active:
+                self._queues.setdefault(agent_id, [])
+            else:
+                self._queues[agent_id] = []
         self._journal(
             "token_issued", agent_id=agent_id, role=role, pane_id=pane_id,
             ttl=ttl,
@@ -305,15 +318,26 @@ class Broker:
         Phase 4 で MCP 公開 (worker/curator 非公開) する面なので、ここでは broker
         内部 API として置く (messaging Phase のライフサイクル検証用)。
 
-        kill が例外で失敗した場合は pane が生存している可能性があるため revoke しない
-        (reap_exited_panes の「生存判定不能を退役扱いしない」方針と統一。codex Minor 対応)。
+        kill が失敗した場合は pane が生存している可能性があるため revoke しない
+        (reap_exited_panes の「生存判定不能を退役扱いしない」方針と統一)。実 adapter は
+        kill を check=False で呼び失敗を例外化しないため、例外捕捉だけでは塞げない。
+        kill 後に pane_exists で実際に消えたことを確認してから revoke する
+        (codex round 2 Minor 対応)。生存判定不能 (adapter 不通) 時は close の意図を
+        尊重して revoke する。
         """
         if self.adapter is not None:
             try:
                 self.adapter.kill_pane(pane_id)
             except Exception as e:
                 self._journal("close_pane_failed", pane_id=pane_id, error=str(e))
-                return []  # kill 失敗 = live pane の可能性。誤 revoke しない
+                return []  # kill 例外 = live pane の可能性。誤 revoke しない
+            try:
+                if self.adapter.pane_exists(pane_id):
+                    # kill が例外を出さずとも pane が残存 = 退役失敗。revoke しない
+                    self._journal("close_pane_still_alive", pane_id=pane_id)
+                    return []
+            except Exception:
+                pass  # 生存判定不能時は従来どおり close 意図を尊重して revoke
         return self.revoke_pane(pane_id, reason="close_pane")
 
     def suspend(self) -> int:
@@ -474,6 +498,18 @@ class Broker:
                 )
                 return
             if state == "idle":
+                # 打鍵直前にロック下で active + pending を再確認する: get_text 〜
+                # send_line の間に revoke/suspend/TTL 失効が入ると失効 pane に
+                # ナッジを打ちうる (codex round 2 Major-A 対応)。本再確認で窓を
+                # send_line 自体の I/O 時間まで縮める (それ以上はロックを I/O 越しに
+                # 保持しない方針のため許容する残余窓。混入しても本文非経由の定型 1 行)。
+                with self._lock:
+                    still_ok = (
+                        target.is_active()
+                        and bool(self._queues.get(target.agent_id))
+                    )
+                if not still_ok:
+                    return
                 self.adapter.send_line(pane_id, NUDGE_TEXT)
                 self._journal(
                     "nudge_sent",
