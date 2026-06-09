@@ -1019,12 +1019,23 @@ class Broker:
         if role not in SPAWNABLE_ROLES:
             return {"ok": False,
                     "error": f"[invalid-params] role must be one of {SPAWNABLE_ROLES}"}
-        # 課金中立 (§1.3): caller argv にヘッドレス / print / Agent-SDK 系 flag があれば拒否する。
-        # 「対話 TUI のみ・ヘッドレスに落ちない」を broker が構造的に強制する (caller 任せにしない)。
+        # 課金中立 (§1.3): 「対話 TUI のみ・ヘッドレスに落ちない」を broker が構造的に強制する
+        # (caller 任せにしない)。argv は非空必須。ヘッドレス / print / Agent-SDK 系 flag を拒否。
+        if not argv:
+            return {"ok": False, "error": "[invalid-params] argv must be non-empty"}
         if not is_interactive_argv(argv):
             return {"ok": False,
                     "error": "[headless_forbidden] argv must launch an interactive TUI "
                              "(no -p/--print/--headless/--output-format)"}
+        # token を注入する = 課金を負う org agent の spawn は **対話 claude TUI に限定**する。
+        # flag blacklist だけだと flag を持たない headless ラッパー (`python agent_sdk.py` 等) を
+        # 通してしまうため、config 注入経路では argv[0] が claude であることを whitelist で要求する
+        # (codex Blocker round 2 対応)。inject_mcp_config=False の非 claude プローブ (cat 等) は
+        # broker token を持たない = org agent でないため、本 whitelist の対象外とする。
+        if inject_mcp_config and argv[0].rsplit("/", 1)[-1] != "claude":
+            return {"ok": False,
+                    "error": "[headless_forbidden] token を注入する agent spawn は対話 claude TUI のみ "
+                             f"(argv[0] must be 'claude', got {argv[0]!r})"}
         # agent_id は per-agent config のファイル名に使う。filename-safe を強制して
         # `../` / 絶対パスで state_dir 外へ token 入り config を書く経路を断つ (codex Major)。
         if not is_filename_safe(agent_id):

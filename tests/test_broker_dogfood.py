@@ -82,12 +82,26 @@ class HeadlessFlagGuardTest(unittest.TestCase):
             self.c.broker.close_pane_target(sp["handle"])
 
     def test_headless_argv_rejected(self) -> None:
-        # 課金中立の構造強制: ヘッドレス / print 系 argv は broker が拒否する。
-        for bad in (["claude", "-p", "x"], ["claude", "--print"], ["claude", "--headless"],
-                    ["claude", "--output-format", "json"], ["claude", "--output-format=json"]):
+        # 課金中立の構造強制: ヘッドレス / print 系 flag に加え、flag を持たない headless ラッパー
+        # (python/node 等) や 空 argv も拒否する (token 注入 agent は対話 claude TUI のみ)。
+        forbidden = (["claude", "-p", "x"], ["claude", "--print"], ["claude", "--headless"],
+                     ["claude", "--output-format", "json"], ["claude", "--output-format=json"],
+                     ["python", "agent_sdk_worker.py"], ["node", "agent.js"])
+        for bad in forbidden:
             r = self.c.broker.spawn_agent("agent-bad", "agent-bad", "worker", bad)
             self.assertFalse(r.get("ok"), bad)
             self.assertIn("[headless_forbidden]", r.get("error", ""), bad)
+        # 空 argv は invalid-params
+        r = self.c.broker.spawn_agent("agent-empty", "agent-empty", "worker", [])
+        self.assertFalse(r.get("ok"))
+        self.assertIn("[invalid-params]", r.get("error", ""))
+
+    def test_non_claude_probe_allowed_without_config(self) -> None:
+        # 非 claude プローブ (cat 等) は token 非注入 (inject_mcp_config=False) なら許可される
+        # (org agent でないため whitelist 対象外)。
+        r = self.c.broker.spawn_agent("probe", "probe", "worker", ["cat"], inject_mcp_config=False)
+        self.assertTrue(r.get("ok"), r)
+        self.c.broker.close_pane_target(r["handle"])
 
 
 if __name__ == "__main__":

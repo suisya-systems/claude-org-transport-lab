@@ -596,14 +596,23 @@ def check_billing(c: Cycle) -> tuple[bool, str]:
             f.append(f"{role}: --mcp-config の指す 0600 config が存在しない: {cfg_path}")
         c.broker.close_pane_target(sp["handle"])
 
-    # 課金中立の **構造強制**: ヘッドレス / print / Agent-SDK 系 argv は broker が拒否する
-    # (caller 任せにしない。codex Blocker 対応)。危険入力を実 API で弾けることを assert。
-    for bad_argv in (["claude", "-p", "x"], ["claude", "--print"],
-                     ["claude", "--headless"], ["claude", "--output-format", "json"],
-                     ["claude", "--output-format=json"]):
+    # 課金中立の **構造強制**: token を注入する agent spawn は対話 claude TUI のみ。ヘッドレス /
+    # print 系 flag に加え、flag を持たない headless ラッパー (`python agent.py` 等) や 空 argv も
+    # 拒否する (caller 任せにしない。codex Blocker round 1/2 対応)。危険入力を実 API で弾けることを assert。
+    bad_cases = [
+        (["claude", "-p", "x"], "[headless_forbidden]"),
+        (["claude", "--print"], "[headless_forbidden]"),
+        (["claude", "--headless"], "[headless_forbidden]"),
+        (["claude", "--output-format", "json"], "[headless_forbidden]"),
+        (["claude", "--output-format=json"], "[headless_forbidden]"),
+        (["python", "agent_sdk_worker.py"], "[headless_forbidden]"),  # flag 無し headless ラッパー
+        (["node", "agent.js"], "[headless_forbidden]"),
+        ([], "[invalid-params]"),                                      # 空 argv
+    ]
+    for bad_argv, want in bad_cases:
         r = c.broker.spawn_agent("agent-bad", "agent-bad", "worker", bad_argv)
-        if r.get("ok") or "[headless_forbidden]" not in r.get("error", ""):
-            f.append(f"ヘッドレス argv {bad_argv} が headless_forbidden で拒否されない: {r}")
+        if r.get("ok") or want not in r.get("error", ""):
+            f.append(f"危険 argv {bad_argv} が {want} で拒否されない: {r}")
             if r.get("ok"):
                 c.broker.close_pane_target(r["handle"])
 
