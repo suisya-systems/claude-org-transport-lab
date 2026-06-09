@@ -85,6 +85,57 @@ class TerminalAdapter(Protocol):
 
     def kill_pane(self, pane_id: PaneId) -> None: ...
 
+    # -- Phase 4 (full backend) 追加面 --------------------------------------
+    def split(
+        self,
+        target: PaneId,
+        argv: list[str],
+        cwd: str | None = ...,
+        direction: str = ...,
+    ) -> PaneRef: ...
+
+    def send_keys(
+        self,
+        pane_id: PaneId,
+        text: str | None = ...,
+        keys: list[str] | None = ...,
+        enter: bool = ...,
+    ) -> None: ...
+
+
+# ---------------------------------------------------------------------------
+# send_keys 鍵語彙 (Set D Surface 1.9。backend 横断の正準集合)
+# ---------------------------------------------------------------------------
+
+# 正規化キー名 (大文字小文字を吸収するためのエイリアス込み)。Ctrl+<A-Z> は
+# パターンで別途許可する。adapter 側がこの正規名を backend ネイティブの
+# キー名 (tmux: Enter/BTab/Escape…、WezTerm: 制御コード) へ写像する。
+SEND_KEYS_VOCAB = {
+    "enter": "Enter", "return": "Enter",
+    "tab": "Tab", "shift+tab": "Shift+Tab", "backtab": "Shift+Tab",
+    "esc": "Esc", "escape": "Esc",
+    "backspace": "Backspace", "delete": "Delete", "del": "Delete",
+    "up": "Up", "down": "Down", "left": "Left", "right": "Right",
+    "home": "Home", "end": "End",
+    "pageup": "PageUp", "pagedown": "PageDown",
+    "space": "Space",
+}
+
+
+def normalize_key(key: str) -> str:
+    """送信キー名を正規名へ。未知キーは ValueError (broker が invalid-params 化)。
+
+    `Ctrl+<A-Z>` は大文字小文字を問わず受理し `Ctrl+X` 形に正規化する。
+    """
+    if not isinstance(key, str) or not key:
+        raise ValueError(f"invalid key {key!r}")
+    low = key.strip().lower()
+    if low in SEND_KEYS_VOCAB:
+        return SEND_KEYS_VOCAB[low]
+    if low.startswith("ctrl+") and len(low) == 6 and low[5].isalpha():
+        return "Ctrl+" + low[5].upper()
+    raise ValueError(f"unknown key name {key!r}")
+
 
 # ---------------------------------------------------------------------------
 # 画面状態ヒューリスティック (AC-1 自動判定の根拠、backend 非依存)

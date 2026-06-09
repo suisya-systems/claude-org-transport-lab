@@ -319,12 +319,15 @@ adapter は「messaging adapter（Phase 3 が要求する最小能力）」と�
 
 ### 7.4 Phase 4: ペイン操作移行（full backend adapter）
 
+> **Phase 4 更新（2026-06-10）**: フォークで spawn / close / list_panes / inspect_pane / send_keys / poll_events を broker + adapter へ配線替えし、下記完了基準を **全項目 GO** で実証（[`spike/RESULTS.md`](../../spike/RESULTS.md) の Phase 4 節、Closes #4）。実機 backend は本環境（Linux/WSL2）で WezTerm 実機不可のため **正準 backend の tmux に読み替え**（窓口経由の人間判断で承認。Phase 2 の tmux 実機 AC 前例に沿う。WezTerm 実機 AC は follow-up）。
+
 フォークで spawn / close / list_panes / inspect_pane / send_keys / poll_events を broker + adapter へ配線替えし、以下を通したら本体へ取り込む:
 
-- WezTerm backend のみ（renga 不使用）で、delegate → spawn → 監視（stall 検出 / 承認待ち観測を含む）→ 完了報告 → CLOSE_PANE → retro の 1 サイクルが完走すること。
-- `poll_events` ポーリング合成の実効遅延が dispatcher 監視ループ（3 分 cadence）の正しさを損なわないこと（pane_exited 取りこぼしが list_panes reconcile で回復すること）。
-- balanced split が WezTerm の geometry 情報で現行同等に機能すること。
-- 取り込み時の同時変更: Surface 1 / 3 / 4 関連の prose 書き換えと契約改訂 PR、Surface 8 案（または Set G）の新設批准。
+- ~~WezTerm backend のみ~~ **tmux backend（renga 不使用、本環境の正準 backend）** で、delegate → spawn → 監視（stall 検出 / 承認待ち観測を含む）→ 完了報告 → CLOSE_PANE → retro の 1 サイクルが完走すること。→ **実証済み**（AC-4-cycle / AC-4-real-tmux GO）。
+- `poll_events` ポーリング合成の実効遅延が dispatcher 監視ループ（3 分 cadence）の正しさを損なわないこと（pane_exited 取りこぼしが list_panes reconcile で回復すること）。→ **実証済み**（AC-4-events / AC-4-cadence GO。合成は単一 lock 下で exactly-once、`_known_panes` record map で exit 後も meta 保持、events_dropped は count 付き）。
+- balanced split が ~~WezTerm の~~ backend の geometry 情報で現行同等に機能すること。→ **実証済み**（AC-4-split GO。現行 split SoT の `claude_org_runtime.dispatcher.runner.choose_split` を**再利用**して構造的に同等保証。prose doc は runtime と drift 済みのため移植せず）。
+- dispatcher 向け broker MCP の最小 surface 確定（worker / curator 非公開の権限分離）。→ **実証済み**（AC-4-surface GO。role tier で `tools/list` フィルタ + `call_tool` `[tool_forbidden]` の二重遮断）。
+- 取り込み時の同時変更: Surface 1 / 3 / 4 関連の prose 書き換えと契約改訂 PR、Surface 8 案（または Set G）の新設批准。→ **本体取り込みスコープ（ja 不可触制約により本フォークでは未実施）**。
 
 ### 7.5 並走実験の分離
 
@@ -353,3 +356,4 @@ adapter は「messaging adapter（Phase 3 が要求する最小能力）」と�
 - 2026-06-08: Phase 1 スパイク（WezTerm / Windows）の AC-1 / AC-2 結果を反映（Phase 1 ゲート通過）。
 - 2026-06-09: Phase 2。tmux adapter（POSIX 正準 backend）を第二実装として追加し、ハーネスを backend パラメータ化。両 backend（tmux/WSL2・WezTerm/Windows）で AC-1 / AC-2 green。§4.7 の tmux 列を「参考」から実測値に格上げし、messaging（Phase 3）/ full backend（Phase 4）の能力境界を 2 表に分離（§4.7.2）。§8 リスク表・§9 スコープ外の tmux 記述を更新（Closes #2）。
 - 2026-06-09: Phase 3（メッセージング移行 / broker 配線）。検証方式 B（broker queue 統合ハーネス / 無課金・決定的・CI 可、ユーザー判断）で §7.3 の完了基準を実証。`spike/run_ac3.py`（FakeAdapter で受信側状態と pane 生死を決定的に駆動）+ CI 常設 `tests/test_broker_phase3.py` を追加し、AC-3（6 経路全数往復・ナッジ defer・なりすまし不可・token ライフサイクル）が全項目 GO。`spike/broker.py` に token ライフサイクル本実装（TTL / pane_exited revoke / close revoke / suspend-resume 再発行、新エラーコード `token_revoked` / `token_expired`＝§5 Surface 6 の MAY 規定内）。実 4 セッション課金実証（方式 A）・分類 (a) prose 書き換え・契約改訂（Set D Surface 2/5・Set C inventory・non-goals §12）は本体取り込みスコープのため本フォークでは未実施（ja 不可触制約）。詳細は [`spike/RESULTS.md`](../../spike/RESULTS.md) の Phase 3 節（Closes #3）。
+- 2026-06-10: Phase 4（ペイン操作移行 / full backend adapter）。検証方式 B（FakeAdapter / 無課金・決定的・CI 可）+ 実 tmux smoke（人間判断で承認、SoT §7.4 の WezTerm 実機要件を本 Linux/WSL2 環境では tmux に読み替え）で §7.4 の完了基準を **全項目 GO** で実証。`spike/run_ac4.py`（geometry / 生死 / 画面状態 / split / send_keys を駆動する Phase 4 用 FakeAdapter + 実 tmux smoke）+ CI 常設 `tests/test_broker_phase4.py`（15 ケース）を追加。`spike/broker.py` に **role-scoped tool 公開**（messaging / ops tier。`tools/list` フィルタ + `[tool_forbidden]` 二重遮断、§4.2）・**ペイン操作 6 面**（`spawn_agent` / `close_pane` / `list_panes` / `inspect_pane` / `send_keys` / `poll_events`）+ `set_pane_identity`・**poll_events 合成**（list_panes 差分から `pane_started`/`pane_exited`/`events_dropped` を単一 lock 下で exactly-once 合成、`_known_panes` record map で exit 後も meta 保持、初回 baseline、count 付き events_dropped）・native id ↔ broker handle 対応を追加。`terminal_adapter.py` に `split`/`send_keys` Protocol + `normalize_key`、`tmux_adapter.py`/`wezterm_adapter.py` に `split`/`send_keys` 実装。**balanced split は現行 split SoT の `claude_org_runtime.dispatcher.runner.choose_split` を再利用**して構造的に現行同等を保証（doc prose は runtime と drift 済みのため移植せず）。事前 codex design review 1 周（Blocker 1 / Major 5 / Minor 3）を実装前に全反映（[`spike/phase4-design-note.md`](../../spike/phase4-design-note.md)）。WezTerm 実機 AC・prose 書き換え（分類 (a)）・契約改訂（Surface 1/3/4・Surface 8 案）は本体取り込みスコープのため本フォークでは未実施（ja 不可触制約）。詳細は [`spike/RESULTS.md`](../../spike/RESULTS.md) の Phase 4 節（Closes #4）。
