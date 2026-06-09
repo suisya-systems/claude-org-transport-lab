@@ -607,6 +607,8 @@ def check_billing(c: Cycle) -> tuple[bool, str]:
         (["claude", "--output-format=json"], "[headless_forbidden]"),
         (["python", "agent_sdk_worker.py"], "[headless_forbidden]"),  # flag 無し headless ラッパー
         (["node", "agent.js"], "[headless_forbidden]"),
+        (["claude", "mcp", "serve"], "[headless_forbidden]"),         # 非 TUI サブコマンド
+        (["claude", "doctor"], "[headless_forbidden]"),
         ([], "[invalid-params]"),                                      # 空 argv
     ]
     for bad_argv, want in bad_cases:

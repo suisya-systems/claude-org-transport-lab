@@ -86,7 +86,8 @@ class HeadlessFlagGuardTest(unittest.TestCase):
         # (python/node 等) や 空 argv も拒否する (token 注入 agent は対話 claude TUI のみ)。
         forbidden = (["claude", "-p", "x"], ["claude", "--print"], ["claude", "--headless"],
                      ["claude", "--output-format", "json"], ["claude", "--output-format=json"],
-                     ["python", "agent_sdk_worker.py"], ["node", "agent.js"])
+                     ["python", "agent_sdk_worker.py"], ["node", "agent.js"],
+                     ["claude", "mcp", "serve"], ["claude", "doctor"])  # 非 TUI サブコマンド
         for bad in forbidden:
             r = self.c.broker.spawn_agent("agent-bad", "agent-bad", "worker", bad)
             self.assertFalse(r.get("ok"), bad)

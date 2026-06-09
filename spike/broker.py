@@ -1029,13 +1029,18 @@ class Broker:
                              "(no -p/--print/--headless/--output-format)"}
         # token を注入する = 課金を負う org agent の spawn は **対話 claude TUI に限定**する。
         # flag blacklist だけだと flag を持たない headless ラッパー (`python agent_sdk.py` 等) を
-        # 通してしまうため、config 注入経路では argv[0] が claude であることを whitelist で要求する
-        # (codex Blocker round 2 対応)。inject_mcp_config=False の非 claude プローブ (cat 等) は
-        # broker token を持たない = org agent でないため、本 whitelist の対象外とする。
-        if inject_mcp_config and argv[0].rsplit("/", 1)[-1] != "claude":
-            return {"ok": False,
-                    "error": "[headless_forbidden] token を注入する agent spawn は対話 claude TUI のみ "
-                             f"(argv[0] must be 'claude', got {argv[0]!r})"}
+        # 通してしまうため、config 注入経路では (1) argv[0] が claude、かつ (2) argv[1] があれば flag
+        # (`-` 始まり) であることを whitelist で要求する。後者は `claude mcp serve` / `claude doctor`
+        # のような非 TUI サブコマンド (bare word の argv[1]) を弾く (codex Blocker/Major round 2/3 対応)。
+        # 実 org の worker spawn は `claude [--flags...]` 形 (初手指示は broker message 経由) のため
+        # 本 whitelist と整合する。inject_mcp_config=False の非 claude プローブ (cat 等) は broker token
+        # を持たない = org agent でないため、本 whitelist の対象外とする。
+        if inject_mcp_config:
+            prog = argv[0].rsplit("/", 1)[-1]
+            if prog != "claude" or (len(argv) > 1 and not argv[1].startswith("-")):
+                return {"ok": False,
+                        "error": "[headless_forbidden] token を注入する agent spawn は対話 claude TUI のみ "
+                                 "(argv は 'claude' [--flags...] 形・非 TUI サブコマンド不可)"}
         # agent_id は per-agent config のファイル名に使う。filename-safe を強制して
         # `../` / 絶対パスで state_dir 外へ token 入り config を書く経路を断つ (codex Major)。
         if not is_filename_safe(agent_id):
