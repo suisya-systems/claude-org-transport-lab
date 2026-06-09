@@ -56,6 +56,86 @@ ROLE_TIER = {
 # spawn_agent が発行できる新 token の role (caller tier 昇格を構造的に禁じる)。
 SPAWNABLE_ROLES = ("worker", "curator")
 
+# 課金中立 (§1.3): spawn する Claude は対話型 TUI のみ。ヘッドレス / Agent-SDK 起動を
+# 構造的に禁じる。spawn_agent はこれらの flag を含む argv を `[headless_forbidden]` で拒否し、
+# 「ヘッドレスに落ちない」を caller 任せではなく broker が強制する (AC-5 課金中立)。
+# 完全一致で弾く flag と、`=value` 形を吸収する prefix の 2 系統で判定する。
+_HEADLESS_EXACT = frozenset(("-p", "--print", "--headless"))
+_HEADLESS_PREFIX = ("--output-format", "--input-format", "--print=")
+
+
+def is_interactive_argv(argv: list[str]) -> bool:
+    """argv が対話 TUI 起動か (ヘッドレス / print / Agent-SDK 系 flag を含まない)。
+
+    blacklist 層。token 注入 spawn では下記 allowlist (is_interactive_claude_argv) と二重で使い、
+    値位置に紛れた headless flag (`--model -p` 等) も弾く。非 claude プローブ路では単独で使う。
+    """
+    for tok in argv:
+        if tok in _HEADLESS_EXACT:
+            return False
+        if any(tok.startswith(p) for p in _HEADLESS_PREFIX):
+            return False
+    return True
+
+
+# 課金中立 (§1.3) — token を注入する org agent の spawn を許す **対話 claude TUI flag allowlist**
+# (default-deny)。allowlist 外の token (未知 flag・非 TUI サブコマンド・bare word・`--`・flag 後の
+# サブコマンド) は一律拒否され、これにより「flag 後サブコマンド」等の理論バイパスも構造的に閉じる。
+# headless 系 (-p/--print/--output-format/--input-format) は意図的に allowlist 外。
+#
+# **保守契約 (重要)**: claude CLI が新しい正規の対話 flag を追加した場合、本 allowlist を拡張するまで
+# その flag を伴う正規起動は false-reject される。拒否時のエラーメッセージが allowlist 拡張を促す。
+# 拡張手順は spike/RESULTS.md (Phase 5 / AC-5 節) と docs/design/renga-decoupling.md (§7.6) を参照。
+_CLAUDE_TUI_VALUE_FLAGS = frozenset((  # 値を 1 つ取る対話 flag
+    "--mcp-config", "--allowedTools", "--allowed-tools", "--disallowedTools",
+    "--disallowed-tools", "--model", "--permission-mode", "--add-dir",
+    "--append-system-prompt", "--settings", "--setting-sources", "--resume",
+    "--session-id", "--agents",
+))
+_CLAUDE_TUI_BOOL_FLAGS = frozenset((  # 値を取らない対話 flag
+    "--strict-mcp-config", "--dangerously-skip-permissions", "--ide",
+    "--continue", "-c", "--verbose", "--debug", "--fork-session",
+))
+
+
+def is_interactive_claude_argv(argv: list[str]) -> tuple[bool, str]:
+    """token 注入 spawn 用の **対話 claude TUI allowlist 判定** (default-deny)。
+
+    argv[0] の basename が claude かつ、以降の token が対話 flag allowlist (+ その値) のみで構成される
+    ことを要求する。返り値: (ok, 拒否理由)。ok=False の理由は呼び手が `[headless_forbidden]` に載せる。
+
+    argv[0] は **basename 判定** (完全一致でない): 実 claude は絶対パス
+    (例 `/home/.../.local/bin/claude`、AC-5 の ps 実測がこの形) で起動されるため、`claude` /
+    `/abs/claude` / `./claude` を許可する必要がある。本 guard の脅威モデルは **trusted な dispatcher が
+    組む argv の誤ヘッドレス化** (defense-in-depth) であり、`claude` という名前の悪意ある wrapper を別パスに
+    置く攻撃は対象外 (それが可能な攻撃者には本 guard 以前の前提が崩れている)。完全一致にすると正規の
+    絶対パス起動を false-reject するため basename を採る (codex self-review への設計判断)。
+    """
+    if not argv:
+        return False, "argv must be non-empty"
+    if argv[0].rsplit("/", 1)[-1] != "claude":
+        return False, f"argv[0] basename must be 'claude' (got {argv[0]!r})"
+    i = 1
+    while i < len(argv):
+        tok = argv[i]
+        flag = tok.split("=", 1)[0]
+        inline = tok.startswith("-") and "=" in tok
+        if flag in _CLAUDE_TUI_BOOL_FLAGS:
+            if inline:
+                return False, f"boolean flag に値が付与されている: {tok!r}"
+            i += 1
+        elif flag in _CLAUDE_TUI_VALUE_FLAGS:
+            if inline:
+                i += 1          # --flag=value 形は 1 token
+            elif i + 1 < len(argv):
+                i += 2          # 次 token を値として消費する
+            else:
+                return False, f"値を取る flag に値が無い: {tok!r}"
+        else:
+            return False, (f"allowlist 外の token: {tok!r} — 対話 claude TUI の正規 flag のみ許可 "
+                           "(許可するには broker の対話 flag allowlist を拡張)")
+    return True, ""
+
 
 def role_tier(role: str) -> int:
     return ROLE_TIER.get(role, TIER_MESSAGING)
@@ -1002,6 +1082,24 @@ class Broker:
         if role not in SPAWNABLE_ROLES:
             return {"ok": False,
                     "error": f"[invalid-params] role must be one of {SPAWNABLE_ROLES}"}
+        # 課金中立 (§1.3): 「対話 TUI のみ・ヘッドレスに落ちない」を broker が構造的に強制する
+        # (caller 任せにしない)。argv は非空必須。
+        if not argv:
+            return {"ok": False, "error": "[invalid-params] argv must be non-empty"}
+        # 二重防御: (1) headless flag blacklist (値位置に紛れた -p 等も弾く)、(2) token 注入経路は
+        # 対話 claude TUI の **allowlist (default-deny)** で許可 flag のみ通す。allowlist が flag 後
+        # サブコマンド・`--`・未知 flag・非 claude ラッパーを一律拒否し、課金を負う org agent の spawn を
+        # 対話 TUI に構造的に限定する (codex round 1-4 / 人間判断で allowlist 化を選択)。非 claude
+        # プローブ (inject_mcp_config=False, cat 等) は broker token を持たない = org agent でないため
+        # allowlist の対象外とし、blacklist のみで通す。
+        if not is_interactive_argv(argv):
+            return {"ok": False,
+                    "error": "[headless_forbidden] argv must launch an interactive TUI "
+                             "(no -p/--print/--headless/--output-format)"}
+        if inject_mcp_config:
+            ok_tui, reason = is_interactive_claude_argv(argv)
+            if not ok_tui:
+                return {"ok": False, "error": f"[headless_forbidden] {reason}"}
         # agent_id は per-agent config のファイル名に使う。filename-safe を強制して
         # `../` / 絶対パスで state_dir 外へ token 入り config を書く経路を断つ (codex Major)。
         if not is_filename_safe(agent_id):

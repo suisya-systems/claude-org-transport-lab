@@ -358,3 +358,117 @@ Phase 1（WezTerm / Windows）と Phase 2（tmux / POSIX）の AC 判定を記�
   例外（adapter 不通）になるケースは、生存判定不能のため close 意図を尊重して ok:true を返す。これは既存
   `close_pane` 内部 API の「生存判定不能を退役扱いしない」方針と統一した挙動であり、adapter 健全時は pane 残存を
   ok:false で正しく弾く。adapter 不通という別事象は `poll_events` の reconcile が回復経路を持つ。
+
+---
+
+## Phase 5 / AC-5（完動ゲート dogfood / Issue #5 / Epic #6 最終ゲート）
+
+- 実施日: 2026-06-10
+- 環境: WSL2（Linux 6.6）/ Python 3.12（claude-org-ja `.venv`）/ tmux 3.4 実機 / 検証モデル: Opus（harness）+
+  **実 Claude worker = Sonnet**（active 1 サイクル）/ codex 0.129.0
+- 検証方式: **方式 B（FakeAdapter / 無課金・決定的・CI 可）を主**とし、(i) 実 tmux cat プローブ 2 サイクル smoke
+  （無課金）と (ii) **実 Claude worker を active で 1 サイクル**回す真の end-to-end dogfood を追加（窓口経由で
+  **人間が token コストを承知の上で承認**、2026-06-10。active サイクルは 1 回のみ）。
+- 設計ノート: [`spike/ac5-design-note.md`](./ac5-design-note.md)（実装前 codex design review 1 周 = Blocker 2 /
+  Major 7 / Minor 3 / Nit 1 を全反映）。最重要修正: (B1) AC-5-resume を既存 `suspend()`=未読 queue 破棄
+  （`broker.py` `revoke_token`）に整合 → 「破棄 + 新 token / 新 queue 成立 + stale 非継承」へ再設計（isolation 証明が強化）、
+  (B2) stall を観測だけでなく「観測後の broker 成立物 = escalation enqueue」まで必須 assert 化。
+- 判定スクリプト: `python run_ac5.py`（方式 B のみ / 無課金・in-sandbox 可）、
+  `AC5_REAL_CLAUDE=1 python run_ac5.py --real-tmux`（実機 dogfood / sandbox 無効）。
+  CI 常設: [`tests/test_broker_dogfood.py`](../tests/test_broker_dogfood.py)（FakeAdapter 6 検証 + headless flag guard、
+  `unittest discover` が拾う。**実 tmux smoke / 実 Claude active は CI 非常設** = unix socket / 課金のため）。
+
+### Issue #5 完了基準（4 項目）と判定 — **総合 GO**
+
+| # | 完了基準 | 判定 | 根拠（AC-5 検証項目） |
+|---|---|---|---|
+| 1 | backend(tmux)のみ・renga 不使用で 委譲サイクルを**複数回**完走 | **GO** | AC-5-multi: 単一 broker / adapter 上で **3 サイクル連続完走**（delegate→spawn→監視→完了報告→CLOSE_PANE→retro）。実機は cat 2 サイクル + 実 Claude active 1 サイクル |
+| 2 | 障害系 broker 成立: stall検出 / escalation / handover / resume | **GO** | AC-5-stall / -escalation / -handover / -resume（下表） |
+| 3 | 課金中立の実測（対話 TUI のみ・ヘッドレスに落ちない） | **GO** | AC-5-billing（argv builder 構造 / CI）+ 実 Claude の **ps 実 argv** が `claude --mcp-config --strict-mcp-config --allowedTools --model sonnet`（`-p`/`--print`/`--headless`/`--output-format` 非含有）+ 起動直後 idle `❯` 対話 TUI 描画 |
+| 4 | 設計書最終版（tmux 格上げ + Phase 結果反映） | **GO** | [`docs/design/renga-decoupling.md`](../docs/design/renga-decoupling.md) を本 AC-5 結果で最終化（後述 §設計書最終化） |
+
+### AC-5 検証項目（方式 B / FakeAdapter）— 全 6 項目 GO
+
+| # | 項目 | 判定 | 根拠 |
+|---|---|---|---|
+| AC-5-multi | 3 サイクル連続完走 + cross-cycle isolation | **GO** | 各サイクルで delegate→spawn(balanced)→監視(inspect_pane で承認待ち/stall 独立観測)→完了報告(token 由来 from)→CLOSE_PANE(token revoke + pane_exited)→retro gate を完走。**native id 再利用を強制**しても handle は別採番・**旧 handle は pane_not_found**（新 pane に誤対応しない）・inbox / token / event cursor がサイクル間で漏れない・各サイクル終了時に全関係 inbox empty・二重 spawn は `[name_in_use]` |
+| AC-5-stall | 連続 busy 独立観測 → stall 判定 → **escalation enqueue** | **GO** | dispatcher が `inspect_pane` で busy を threshold(3) 連続観測 → stall 判定（idle/input_pending は誤検出なし）→ **観測後の成立物として secretary へ escalation を broker enqueue**（from=dispatcher, token 由来） |
+| AC-5-escalation | defer-then-deliver + 帰属 + 人間返答の worker 転送(at-most-once) | **GO** | 判断仰ぎが secretary busy 中 `nudge_deferred`（打鍵されず）→ idle 復帰で配達（from=worker, token 由来）→ 人間返答を secretary→worker へ broker 転送 → worker 側 1 通 drain・2 回目空（at-most-once） |
+| AC-5-handover | ops tier 引き継ぎ + 監視 cursor 不喪失 | **GO** | secretary が ops tier `inspect_pane(dispatcher)` + `send_keys(/clear・/dispatcher-resume)` で**ペインを閉じず**引き継ぎ（dispatcher の `pane_exited` を emit しない・list 残存）。handover 中に発生した worker の `pane_exited` を **handover 前 cursor** から取りこぼさない |
+| AC-5-resume | suspend(全revoke+未読破棄) → token 再発行 → stale 非継承 | **GO** | `suspend()` が全 token revoke（戻り値=revoke 数）+ 旧 token は `token_revoked`・失効 token からの送信も拒否 + suspend 前の未読を破棄（既存方針）→ resume は別 token を再発行（旧 token 再利用不可）→ 新 queue は空（旧 lifecycle 未読の**非継承**）→ 新 token で送受信成立 |
+| AC-5-billing | 対話 TUI argv の構造保証（allowlist / default-deny） | **GO** | token を注入する agent spawn は **対話 claude TUI flag allowlist** のみ許可（default-deny）。headless 系（`-p`/`--print`/`--headless`/`--output-format`/`--input-format`）・flag 無しラッパー（`python …`）・非 TUI サブコマンド（`claude mcp serve` / `claude doctor`）・flag 後サブコマンド・`--`・未知 flag・値位置の headless flag・空 argv を一律拒否。平文 token も argv 非露出（0600 config path 参照）。非 claude プローブ（`inject_mcp_config=False`, cat 等）は org token 非保持のため allowlist 対象外（blacklist のみ） |
+
+### 実機 dogfood（実 tmux + 実 Claude active 1 サイクル）— **GO**
+
+人間承認（2026-06-10）に基づき、token コストを承知の上で **実 Claude worker を active で 1 サイクルのみ**実行した。
+
+- **委託（broker 経由 / renga 不使用）**: synthetic dispatcher token から実 Claude worker（`claude-spike`, role=worker）へ
+  broker queue で DELEGATE を enqueue → ナッジ配達 → worker が `check_messages` で受領。
+- **実作業**: 実 Claude（Sonnet, 対話 TUI）が実 turn を実行（`2+2` を計算）。
+- **完了報告（broker 経由 / token 由来 from）**: worker が `send_message(to_id='observer', …)` → broker queue →
+  observer(secretary 相当) が `from_id='claude-spike'`（**token bind 由来・自己申告ではない**）で受領。
+  本文 = `完了報告: 2+2=4 / dogfood active cycle 完走`。
+- **クローズ**: `close_pane` で worker pane 退役 + token revoke（`closed=['claude-spike']`、以後 `token_revoked`）。
+- **起動チェーン実測**: folder trust prompt を `send-keys Enter` で**機械承認** → 対話 TUI idle 到達 **2.0s** /
+  broker 登録 **2.0s**（Phase 1/2 AC-2 の実測と整合）。
+- **課金中立の実測（attestation）**:
+  - 起動直後 idle で `❯` プロンプトの**対話 TUI 描画を観測**（ヘッドレス print-and-exit なら描画されない）。
+  - 実行中 claude プロセスの **ps 実 argv** =
+    `claude --mcp-config <0600> --strict-mcp-config --allowedTools mcp__org-broker__{send_message,check_messages,list_peers,set_summary} --model sonnet`。
+    `-p`/`--print`/`--headless`/`--output-format`/`--input-format` を**一切含まない**（= ヘッドレスに落ちていない実測証跡）。
+  - 機械可読の証跡: `broker-state/ac5/active-evidence.json`（git 管理外、再実行で再生成）。
+
+### 総合判定（Phase 5 / AC-5 完動ゲート）
+
+- **AC-5: 全 6 項目 GO**（multi / stall / escalation / handover / resume / billing）+ **実機 dogfood GO**
+  （cat 2 サイクル smoke + 実 Claude active 1 サイクル完走）。
+- **Issue #5 完了基準 4 項目すべて GO**。フォーク組織が **backend(tmux)のみ・renga 不使用**で 委譲サイクルを
+  複数回完走し、障害系4種が broker 経由で成立し、課金中立（対話 TUI のみ・ヘッドレス非該当）を実測で確認、
+  設計書を最終化。**Epic #6（Plan B / renga 依存解消）完動ゲート = GO**（フォーク側足切り通過）。
+- 規律維持: 方式 B は無課金・決定的・CI 可・prose 非破壊。実 Claude は人間承認の 1 サイクルのみ（最小コスト）。
+
+### codex セルフレビュー（full 検証深度）
+
+- **実装前 design review 1 周**（Blocker 2 / Major 7 / Minor 3 / Nit 1）: 着手前に全反映（[`ac5-design-note.md`](./ac5-design-note.md)）。
+- **commit 後 self-review**: 本 AC-5 差分（`run_ac5.py` / `test_broker_dogfood.py` / 文書）を `codex exec` 直打ちでレビューし、
+  Blocker / Major を修正コミットで解消（詳細は PR 本文）。
+
+### 課金中立 argv allowlist の保守契約（option C / 人間判断 2026-06-10）
+
+課金中立 guard は組織全体で再利用される load-bearing なハーネスのため、blocklist の後追いではなく
+**allowlist（default-deny）** で構造的に閉じる方針を人間判断で採用した（codex self-review で
+「flag 後サブコマンド」「`--` バイパス」等の理論バイパスが blocklist 後追いでは閉じきれなかったため）。
+
+- **実装**: `broker.is_interactive_claude_argv()`（`spike/broker.py`）が token 注入 spawn の argv を
+  `argv[0]==claude` + 対話 flag allowlist（`_CLAUDE_TUI_VALUE_FLAGS` / `_CLAUDE_TUI_BOOL_FLAGS`）+ その値
+  のみに限定する。allowlist 外の token は一律 `[headless_forbidden]`。併せて headless flag blacklist
+  （`is_interactive_argv()`）を二重に適用し、値位置に紛れた `-p` 等も弾く。
+- **「flag 後サブコマンド」理論バイパスの解消**: allowlist 化により `["claude","--strict-mcp-config","mcp","serve"]`
+  のような flag 後サブコマンドも「allowlist 外の bare word token」として自動的に拒否される（default-deny）。
+- **保守契約（重要・トレードオフ）**: allowlist 方式は claude CLI が**新しい正規の対話 flag**を追加すると、
+  allowlist を拡張するまでその flag を伴う正規起動を **false-reject** する。これを緩和するため:
+  1. 拒否時のエラーメッセージに「allowlist 外の token … 許可するには broker の対話 flag allowlist を拡張」を明示。
+  2. **allowlist 拡張手順**: `spike/broker.py` の `_CLAUDE_TUI_VALUE_FLAGS`（値を 1 つ取る flag）または
+     `_CLAUDE_TUI_BOOL_FLAGS`（値を取らない flag）に当該 flag 名を追加する。**headless 系
+     （`-p`/`--print`/`--output-format`/`--input-format`/`--headless`）は決して allowlist に入れない**こと
+     （課金中立の足切りが破れる）。追加後は `tests/test_broker_dogfood.py` の許可/拒否ケースを更新する。
+- **`argv[0]` は basename 判定（設計判断）**: 実 claude は絶対パス（`/home/.../.local/bin/claude`、AC-5 の ps 実測がこの形）で
+  起動されるため、`claude` / `/abs/claude` / `./claude` を許可する必要がある。完全一致にすると正規の絶対パス起動を
+  false-reject するため basename を採る。本 guard の脅威モデルは **trusted な dispatcher が組む argv の誤ヘッドレス化**
+  （defense-in-depth）であり、`claude` という名前の悪意ある wrapper を別パスに置く攻撃は対象外（codex self-review への
+  設計判断として記録）。
+- 本体（claude-org-runtime）取り込み時は、この allowlist を runtime 側の spawn 実装へ移植し、同じ保守契約を継承する。
+
+### 既知制限（Phase 5 / AC-5）
+
+- **実 Claude は active 1 サイクルのみ**: 複数サイクルの実 Claude 往復は実在性が Phase 1/2 AC-1/AC-2 で既証のため
+  行わない（新規の構造的証拠は増えず token のみ消費）。複数サイクルの構造実証は方式 B（FakeAdapter, 3 サイクル）が担う。
+- **課金中立は「対話 TUI / 非ヘッドレス」の実測 attestation**であり、課金メーター値の検証ではない（idle ❯ 描画 + 実 argv に
+  headless flag なし、を実測する。active turn の課金は人間承認済み）。
+- **実機分（実 tmux smoke / 実 Claude active）は CI 非常設**: sandbox の unix socket 制約 + 課金のため。CI は
+  FakeAdapter の決定的 7 ケースで常設化（`tests/test_broker_dogfood.py`）。
+- **実 Claude spawn は Phase 1/2 proven の対話起動（`adapter.spawn` + `--allowedTools`）を再利用**: balanced split
+  経由の spawn_agent は cat プローブ smoke で実機実証済み（実 Claude での balanced split は本ゲートの要件外）。
+- **prose 書き換え・契約改訂（Set D/C・non-goals §12）は本体取り込みスコープ**: ja 不可触制約（Epic #6 完動ゲート前）
+  により本フォークでは行わない（Phase 3/4 と同じ）。
+- **WezTerm 実機 AC は Issue #9（Windows 専用）**。本ゲートの backend は tmux 実機で実証（Phase 2/4 と同じ人間承認読み替え）。
