@@ -529,12 +529,16 @@ def real_tmux_smoke() -> tuple[bool, str]:
             f.append(f"list_panes geometry 不足: {panes}")
         # baseline poll
         cursor = broker.poll_events(since=None, timeout_ms=0)["next_since"]
-        # balanced split で worker pane を spawn (choose_split → adapter.split)
-        sp = broker.spawn_agent("worker-smoke", "worker-smoke", "worker", ["cat"])
+        # balanced split で worker pane を spawn (choose_split → adapter.split)。
+        # cat は --mcp-config を消費できないプローブのため inject_mcp_config=False
+        # (token→worker の config 注入経路は Phase 1/2 AC-2 で実証済み)。
+        sp = broker.spawn_agent("worker-smoke", "worker-smoke", "worker", ["cat"],
+                                inject_mcp_config=False)
         if not sp.get("ok"):
             # capacity 等で None の場合は明示 target で split を実証する
             sp = broker.spawn_agent("worker-smoke", "worker-smoke", "worker", ["cat"],
-                                    target=broker.mcp_list_panes()[0]["id"])
+                                    target=broker.mcp_list_panes()[0]["id"],
+                                    inject_mcp_config=False)
         if not sp.get("ok"):
             f.append(f"実 tmux split spawn 失敗: {sp}")
         else:

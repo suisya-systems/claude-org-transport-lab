@@ -301,11 +301,35 @@ Phase 1（WezTerm / Windows）と Phase 2（tmux / POSIX）の AC 判定を記�
   backend geometry で現行（renga）と同等（`choose_split` 再利用で構造的保証）。dispatcher 向け broker MCP
   最小 surface を確定（worker/curator 非公開の権限分離）。無課金・決定的・CI 可・prose 非破壊の規律を維持。
 
+### codex セルフレビュー（full 検証深度）
+
+- **実装前 design review 1 周**（Blocker 1 / Major 5 / Minor 3）: 着手前に全反映（balanced split を
+  `choose_split` 再利用に切替、poll_events 合成の lock/payload/baseline/events_dropped 詰め、tool_forbidden
+  wire 形状・role 信頼境界の明記）。詳細は [`phase4-design-note.md`](./phase4-design-note.md)。
+- **commit 後 self-review round 1**（Blocker 2 / Major 5 / Minor 1 / Nit 1）: 全 Blocker / Major を修正
+  コミットで解消。
+  - **Blocker**: (1) `set_pane_identity` の可変 `role` でのツール権限昇格 → **不変 `auth_role`**（issue_token
+    確定）を権限 tier の唯一の根拠にし、表示 `role` と分離。(2) `spawn_agent` に token→worker の接続経路が
+    無い → **token 先発行 + per-agent `--mcp-config`（0600）を起動 argv に注入**（§4.6 段階 1）+ split 失敗時
+    revoke。
+  - **Major**: pane_exited 合成時に token 未 revoke → **pane_exited で即時 revoke**（保留集合経由、§4.4）/
+    native id を MCP payload に露出（handle 取り違え）→ **handle のみ露出**（list_panes / events / spawn 応答
+    から native 除去）/ pane exit 時の handle 未掃除（native 再利用で stale）→ **exit で handle 対応を掃除** /
+    split 失敗 `[io_error]` が adapter 例外文字列（将来 token-bearing argv）を素通し → **サニタイズ**（journal
+    のみ）/ poll_events が `_lock` 保持で `list_panes` I/O → **I/O を `_lock` 外**へ（`_reconcile_lock` で
+    合成を直列化、exactly-once 維持）。
+  - **exactly-once の整理（Major への回答）**: Set D §3.1 の exactly-once は「イベント **emit** が close/crash
+    ごとに 1 回」であり（`_diff_emit_locked` が単一 lock + `_reconcile_lock` 直列化で担保。回帰テストで反復
+    reconcile でも pane_exited が 1 回を確認）、「1 reader へ 1 回 deliver」ではない。`poll_events` は renga と
+    同型の **replayable な cursor 読み出し**（caller が next_since で前進）であり、cursor モデルとして正しい。
+  - 回帰テスト追加（`tests/test_broker_phase4.py` 計 20 ケース）: 権限昇格不可 / crash→token revoke /
+    config 注入 + split 例外時 revoke + 例外サニタイズ / payload に native id 非露出 / emit 1 回。
+
 ### 既知制限（Phase 4）
 
-- **WezTerm 実機 AC は未実施（follow-up）**: 本環境は Linux/WSL2 のため WezTerm 実機不可。正準 backend の
-  tmux で実機 smoke を通した（人間判断で承認）。WezTerm の `split` / `send_keys` は parity 実装に留まり、
-  Windows 環境での実機検証は別途 follow-up。
+- **WezTerm 実機 AC は未実施（follow-up: Issue #9）**: 本環境は Linux/WSL2 のため WezTerm 実機不可。正準
+  backend の tmux で実機 smoke を通した（人間判断で承認）。WezTerm の `split` / `send_keys` は parity 実装に
+  留まり、Windows 環境での実機検証は別途 follow-up（Issue #9）。
 - **実 tmux smoke は CI 非常設**: sandbox の unix socket 制約のため CI（`unittest discover`）からは除外。
   CI は FakeAdapter の決定的 15 ケースで常設化し、実 tmux smoke は `run_ac4.py` の手動ランナーで実証。
 - **方式 B の合成役割**: 4 役割は実 Claude セッションではなく token bind された合成役割。pane 操作・

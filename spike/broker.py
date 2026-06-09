@@ -211,6 +211,11 @@ class AgentBind:
     agent_id: str
     name: str
     role: str
+    # 権限 tier を決める **不変** role。issue_token でのみ設定し set_pane_identity からは
+    # 変更不可 (codex Blocker 対応: 可変 role でのツール権限昇格を構造的に断つ)。
+    # `role` は list_peers / list_panes 表示用の可変ラベル (Set D §1.8) であり、権限判定は
+    # auth_role のみを見る。空文字は最小権限 (messaging) に倒れる (role_tier の fail-safe)。
+    auth_role: str = ""
     pane_id: PaneId | None = None     # backend ネイティブ型 (WezTerm=int / tmux="%N"=str)
     registered: bool = False          # MCP initialize 到達で True (AC-2-3 の検知点)
     registered_at: float | None = None
@@ -290,6 +295,13 @@ class Broker:
         self._pane_handles: dict[PaneId, int] = {}
         self._handle_to_native: dict[int, PaneId] = {}
         self._handle_seq = 0
+        # reconcile は backend I/O (list_panes) を伴うため _lock の外で行い、診断の
+        # 一意性は専用 lock で直列化する (codex Minor 対応: _lock を I/O 越しに保持
+        # しない = auth/messaging/close を reconcile の遅延で詰まらせない)。
+        self._reconcile_lock = threading.Lock()
+        # pane_exited 合成時に revoke すべき native の保留集合。revoke_token は _lock を
+        # 取り直すため、合成 (lock 下) では集めるだけにし lock 解放後に適用する。
+        self._pending_exit_revokes: list[PaneId] = []
 
     # ------------------------------------------------------------- lifecycle
     def start(self) -> None:
@@ -361,8 +373,9 @@ class Broker:
                 for b in self._binds.values()
             )
             self._binds[token] = AgentBind(
-                token=token, agent_id=agent_id, name=name, role=role, pane_id=pane_id,
-                issued_at=now,
+                token=token, agent_id=agent_id, name=name, role=role,
+                auth_role=role,  # 不変。権限 tier の唯一の根拠 (set_pane_identity で変わらない)
+                pane_id=pane_id, issued_at=now,
                 expires_at=(now + ttl) if ttl is not None else None,
             )
             if had_active:
@@ -730,13 +743,19 @@ class Broker:
             return self._handle_to_native.get(h)
 
     # --- poll_events 合成 (唯一の合成点。exactly-once は単一 lock で担保) ----
-    def _emit_locked(self, etype: str, native: PaneId, meta: dict) -> None:
+    def _emit_locked(self, etype: str, native: PaneId, meta: dict) -> int:
+        """イベント 1 件を log に積む (単一 lock 下で唯一 emit。exactly-once 担保)。
+
+        payload は **broker handle (`id`) のみ** を露出し native pane id は載せない
+        (MCP 面は handle で話す。WezTerm の native int と handle int の取り違え回避。
+        codex Major 対応)。返り値は採番した handle (exit 時の handle 掃除に使う)。
+        """
         self._event_seq += 1
+        handle = self._handle_for_locked(native)
         ev = {
             "seq": self._event_seq,
             "type": etype,
-            "pane_id": native,                       # native (情報用)
-            "id": self._handle_for_locked(native),   # broker handle (Set D 数値 id)
+            "id": handle,                            # broker handle (Set D 数値 id)
             "name": meta.get("name"),
             "role": meta.get("role"),
             "agent_id": meta.get("agent_id"),
@@ -747,20 +766,15 @@ class Broker:
             overflow = len(self._events) - self.event_cap
             self._dropped_total += overflow
             del self._events[:overflow]
+        return handle
 
-    def _reconcile_locked(self) -> None:
-        """adapter.list_panes 差分から pane_started / pane_exited を合成する。
+    def _diff_emit_locked(self, raw: list[dict]) -> None:
+        """list_panes スナップショット (raw) と _known_panes の差分を合成する (_lock 下)。
 
-        イベントの唯一の出所がこの差分なので、broker 非経由の close (クラッシュ /
-        直 kill) も次の reconcile で pane 消失として必ず pane_exited 化される
-        (取りこぼしの構造的回復)。adapter 不通時は何も合成しない (誤合成回避)。
+        I/O (list_panes) は呼出側が _lock の外で取得済み。本メソッドは差分計算と emit のみ。
+        pane_exited 時は (1) revoke を保留集合へ積み (pane 退役時 revoke、§4.4)、
+        (2) handle 対応を掃除する (native id 再利用で stale handle が再対応しない。codex Major 対応)。
         """
-        if self.adapter is None:
-            return
-        try:
-            raw = self.adapter.list_panes()
-        except Exception:
-            return  # adapter_unavailable: 生存判定不能を「退役」と扱わない
         current: dict[PaneId, dict] = {}
         for rec in raw:
             nid = rec.get("pane_id")
@@ -777,10 +791,35 @@ class Broker:
         for nid in list(self._known_panes):
             if nid not in current:
                 # exit 後は meta を復元できないため直近スナップショットの meta を使う
-                self._emit_locked("pane_exited", nid, self._known_panes[nid])
+                handle = self._emit_locked("pane_exited", nid, self._known_panes[nid])
+                self._pending_exit_revokes.append(nid)  # lock 解放後に revoke
+                self._handle_to_native.pop(handle, None)  # handle 対応を掃除
+                self._pane_handles.pop(nid, None)
         self._known_panes = current
 
+    def _apply_pending_revokes(self) -> None:
+        """pane_exited で積んだ native の token を revoke する (_lock 解放後に呼ぶ)。
+
+        pane 退役 = 即時 revoke (§4.4)。broker 非経由 kill / crash でも poll_events の
+        reconcile が pane_exited を合成した時点で token を失効させ、漏洩面を閉じる
+        (reap_exited_panes の明示呼出を待たない。codex Major 対応)。revoke は冪等なので
+        close_pane で既に revoke 済みでも二重作用はしない。
+        """
+        with self._lock:
+            pend = self._pending_exit_revokes
+            self._pending_exit_revokes = []
+        for native in pend:
+            self.revoke_pane(native, reason="pane_exited")
+
     def _collect_events_locked(self, since, types) -> dict:
+        """cursor (since) より後のイベントを返す (Set D §3.1 の cursor-based long-poll)。
+
+        本面は **replayable な cursor 読み出し** であり破壊的 queue ではない: 同一 since の
+        並行 poll は同じイベントを返す (caller が next_since でカーソルを前進させる renga と
+        同型のセマンティクス)。Set D の exactly-once は「イベントの **emit** が close/crash
+        ごとに 1 回」であり (それは _diff_emit_locked が単一 lock + _reconcile_lock 直列化で
+        担保する)、「1 reader へ 1 回 deliver」ではない (cursor モデルは再読を許す)。
+        """
         max_seq = self._event_seq
         if since is None:
             # 初回 = 「今以降」: 履歴を返さず現在 seq をカーソルにする (Set D §3.1)
@@ -815,17 +854,31 @@ class Broker:
         timeout = min(max(int(timeout_ms), 0), 30000) / 1000.0
         deadline = time.monotonic() + timeout
         while True:
+            self._reconcile()  # backend I/O は _lock 外。差分 emit + revoke 適用を含む
             with self._lock:
-                self._reconcile_locked()
                 result = self._collect_events_locked(since, types)
             if result["events"] or timeout <= 0 or time.monotonic() >= deadline:
                 return result
             time.sleep(min(self.event_poll_interval, max(deadline - time.monotonic(), 0)))
 
     def _reconcile(self) -> None:
-        """外部から呼ぶ reconcile (lock 取得つき)。spawn/close 直後の即時合成用。"""
-        with self._lock:
-            self._reconcile_locked()
+        """list_panes 差分からイベントを合成する (唯一の合成点)。
+
+        backend I/O (list_panes) は _lock の外で実行し、合成の一意性は _reconcile_lock で
+        直列化する (二重 reconcile による pane_exited 二重 emit を防ぐ = exactly-once、
+        かつ _lock を I/O 越しに保持しない)。adapter 不通時は何も合成しない (誤合成回避)。
+        spawn/close 直後の即時合成や poll_events のループから呼ぶ。
+        """
+        if self.adapter is None:
+            return
+        with self._reconcile_lock:
+            try:
+                raw = self.adapter.list_panes()
+            except Exception:
+                return  # adapter_unavailable: 生存判定不能を「退役」と扱わない
+            with self._lock:
+                self._diff_emit_locked(raw)
+        self._apply_pending_revokes()
 
     # --- pane 操作 (ops tier) ---------------------------------------------
     def mcp_list_panes(self) -> list[dict]:
@@ -836,7 +889,7 @@ class Broker:
         """
         if self.adapter is None:
             raise ToolArgError("[adapter_unavailable] no terminal backend")
-        raw = self.adapter.list_panes()
+        raw = self.adapter.list_panes()  # backend I/O は _lock の外で取得する
         out: list[dict] = []
         with self._lock:
             for rec in raw:
@@ -844,9 +897,10 @@ class Broker:
                 if nid is None:
                     continue
                 meta = self._pane_meta_locked(nid)
+                # MCP 面は broker handle (`id`) のみで pane を指す。native id は露出しない
+                # (WezTerm の native int と handle int の取り違え回避。codex Major 対応)。
                 rc = {
                     "id": self._handle_for_locked(nid),
-                    "pane_id": nid,
                     "name": meta["name"],
                     "role": meta["role"],
                     "focused": bool(rec.get("focused", rec.get("active", False))),
@@ -881,15 +935,42 @@ class Broker:
         ]
         return runner.choose_split(panes)
 
+    def _write_agent_mcp_config(self, agent_id: str, token: str) -> Path:
+        """per-agent の mcp-config を 0600 で書き出す (§4.4 の token 受け渡し経路)。
+
+        token は queue store / journal には平文で書かない方針 (§4.4) だが、起動引数
+        `--mcp-config` 経由の受け渡しは §4.4 が明示的に認める 0600 一時ファイル経路。
+        """
+        cfg_dir = self.state_dir / "agents"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        path = cfg_dir / f"{agent_id}.mcp.json"
+        path.write_text(
+            json.dumps(self.mcp_config_for(token), ensure_ascii=False),
+            encoding="utf-8",
+        )
+        try:
+            import os as _os
+            _os.chmod(path, 0o600)
+        except OSError:
+            pass  # Windows 等で chmod 非対応でも config 自体は書ける
+        return path
+
     def spawn_agent(
         self, agent_id: str, name: str, role: str, argv: list[str],
         cwd: str | None = None, target: int | None = None,
         direction: str | None = None, ttl: float | None = None,
+        inject_mcp_config: bool = True,
     ) -> dict:
         """balanced split で新 agent pane を spawn + token 発行 + bind (設計書 §4.6)。
 
-        target 省略時は choose_split が geometry から split 対象/方向を決める。
-        候補が無ければ split_capacity_exceeded を返す (spawn せず escalate 相当)。
+        起動チェーン (§4.6 段階 1): token を **先に** 発行し、per-agent の `--mcp-config`
+        (0600) を起動 argv に注入してから split する。spawn された worker はこの config で
+        broker に接続し initialize handshake で registered になる (登録検知は §4.6 段階 4)。
+        起動チェーン自体は Phase 1/2 AC-2 で両 backend 実証済み。
+
+        target 省略時は choose_split が geometry から split 対象/方向を決める。候補が無ければ
+        split_capacity_exceeded を返す (spawn せず escalate 相当)。実 Claude を起動しない
+        プローブ (cat 等) では inject_mcp_config=False を渡す (config を消費できないため)。
         """
         if self.adapter is None:
             return {"ok": False, "error": "[adapter_unavailable] no terminal backend"}
@@ -909,17 +990,27 @@ class Broker:
             direction = direction or "vertical"
         if target_native is None:
             return {"ok": False, "error": "[pane_not_found] split target unresolved"}
+        # token を先に発行し (§4.4 発行=spawn 要求時点)、起動 argv に config を注入する。
+        tok = self.issue_token(agent_id, name, role, pane_id=None, ttl=ttl)
+        launch_argv = list(argv)
+        if inject_mcp_config:
+            cfg_path = self._write_agent_mcp_config(agent_id, tok)
+            launch_argv += ["--mcp-config", str(cfg_path)]
         try:
-            ref = self.adapter.split(target_native, argv, cwd=cwd, direction=direction)
+            ref = self.adapter.split(target_native, launch_argv, cwd=cwd, direction=direction)
         except Exception as e:
-            return {"ok": False, "error": f"[io_error] split failed: {e}"}
-        tok = self.issue_token(agent_id, name, role, pane_id=ref.pane_id, ttl=ttl)
+            # 失敗時は発行済み token を revoke して漏洩面を残さない。adapter 例外文字列は
+            # argv (token-bearing になりうる) を含むため MCP 応答へ素通ししない (codex Major)。
+            self.revoke_token(tok, reason="spawn_failed")
+            self._journal("spawn_failed", agent_id=agent_id, error=str(e))
+            return {"ok": False, "error": "[io_error] split failed"}
+        self.bind_pane(tok, ref.pane_id)  # pane id 確定後に token↔pane を bind
         self._reconcile()  # 新 pane を pane_started として即時合成 + handle 採番
         with self._lock:
             handle = self._handle_for_locked(ref.pane_id)
         return {
             "ok": True, "pane_id": ref.pane_id, "handle": handle,
-            "direction": direction, "token": tok,  # token は MCP 応答で除去する
+            "direction": direction, "token": tok,  # token / pane_id は MCP 応答で除去する
         }
 
     def inspect_pane(self, target, lines: int | None = None,
@@ -933,7 +1024,8 @@ class Broker:
         try:
             text = self.adapter.get_text(native)
         except Exception as e:
-            return {"ok": False, "error": f"[io_error] get_text failed: {e}"}
+            self._journal("inspect_pane_failed", error=str(e))
+            return {"ok": False, "error": "[io_error] get_text failed"}
         if lines is not None and lines >= 0:
             text = "\n".join(text.splitlines()[-lines:]) if lines else ""
         result = {"ok": True, "text": text,
@@ -968,11 +1060,18 @@ class Broker:
         except ValueError as e:
             return {"ok": False, "error": f"[invalid-params] {e}"}
         except Exception as e:
-            return {"ok": False, "error": f"[io_error] send_keys failed: {e}"}
+            self._journal("send_keys_failed", error=str(e))
+            return {"ok": False, "error": "[io_error] send_keys failed"}
         return {"ok": True}
 
     def set_pane_identity(self, target, name=None, role=None) -> dict:
-        """pane の bind name/role を更新 (Set D §1.8 継承)。name は検証する。"""
+        """pane の bind の **表示** name/role を更新 (Set D §1.8 継承)。name は検証する。
+
+        ここで更新する `role` は list_peers / list_panes 表示用のラベルであり、権限 tier を
+        決める `auth_role` (issue_token で確定・不変) には一切影響しない。ops token が worker
+        pane に role="dispatcher" を設定しても、その worker の token は ops 面に昇格しない
+        (codex Blocker 対応: 可変メタデータでの権限昇格を構造的に断つ)。
+        """
         native = self._resolve_target(target)
         if native is None:
             return {"ok": False, "error": "[pane_not_found] unknown pane handle"}
@@ -1028,11 +1127,11 @@ class Broker:
         # worker/curator の token では pane 操作が tools/list にも出ず、ここでも
         # [tool_forbidden] で弾かれる (許可設定ではなく権限分離)。
         required = TOOL_TIER.get(name)
-        if required is not None and required > role_tier(bind.role):
+        if required is not None and required > role_tier(bind.auth_role):
             return {
                 "content": [{
                     "type": "text",
-                    "text": f"[tool_forbidden] '{name}' not available to role '{bind.role}'",
+                    "text": f"[tool_forbidden] '{name}' not available to role '{bind.auth_role}'",
                 }],
                 "isError": True,
             }
@@ -1102,9 +1201,10 @@ class Broker:
                 cwd=args.get("cwd"), target=args.get("target"),
                 direction=args.get("direction"),
             )
-            # token は MCP 応答に載せない (broker 内部のみ。--mcp-config 注入経路で
-            # worker に渡る設計。dispatcher MCP client には露出しない = 漏洩面の限定)
-            result = {k: v for k, v in spawned.items() if k != "token"}
+            # token (漏洩面の限定) と native pane_id (handle と取り違え回避) は MCP 応答に
+            # 載せない。dispatcher MCP client には handle (`id`) のみ返す。
+            result = {k: v for k, v in spawned.items()
+                      if k not in ("token", "pane_id")}
         elif name == "set_pane_identity":
             target = args.get("target")
             if target is None:
@@ -1267,11 +1367,12 @@ class _McpHandler(BaseHTTPRequestHandler):
                 session_id=session_id,
             )
         elif method == "tools/list":
-            # role tier で公開面をフィルタ (worker/curator には pane 操作を出さない)
+            # role tier で公開面をフィルタ (worker/curator には pane 操作を出さない)。
+            # 不変の auth_role で判定する (set_pane_identity の表示 role 変更で動かない)。
             self._send_json(
                 200,
                 {"jsonrpc": "2.0", "id": req_id,
-                 "result": {"tools": tools_for_role(bind.role)}},
+                 "result": {"tools": tools_for_role(bind.auth_role)}},
             )
         elif method == "tools/call":
             params = req.get("params") or {}
