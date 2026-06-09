@@ -24,7 +24,12 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from wezterm_adapter import NUDGE_TEXT, WezTermAdapter, classify_pane_state
+from terminal_adapter import (
+    NUDGE_TEXT,
+    TerminalAdapter,
+    classify_pane_state,
+    make_adapter,
+)
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 SERVER_INFO = {"name": "org-broker-spike", "version": "0.1.0"}
@@ -90,7 +95,7 @@ class Broker:
     def __init__(
         self,
         state_dir: str | Path,
-        adapter: WezTermAdapter | None = None,
+        adapter: TerminalAdapter | None = None,
         host: str = "127.0.0.1",
         port: int = 0,
         nudge_defer_interval: float = 2.0,
@@ -545,8 +550,12 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="org-broker spike (standalone)")
     ap.add_argument("--port", type=int, default=48720)
     ap.add_argument("--state-dir", default=str(Path(__file__).parent / "broker-state"))
+    ap.add_argument(
+        "--backend", choices=("wezterm", "tmux"), default=None,
+        help="terminal backend (省略時は OS から自動選択: POSIX=tmux / Windows=wezterm)",
+    )
     ns = ap.parse_args()
-    b = Broker(state_dir=ns.state_dir, adapter=WezTermAdapter(), port=ns.port)
+    b = Broker(state_dir=ns.state_dir, adapter=make_adapter(ns.backend), port=ns.port)
     b.start()
     print(f"org-broker spike listening on {b.url}")
     tok = b.issue_token("manual-test", "manual-test", "worker")

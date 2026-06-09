@@ -1,54 +1,72 @@
-# renga 依存解消 Phase 1 スパイク (org-broker + WezTerm adapter)
+# renga 依存解消スパイク (org-broker + terminal adapter: WezTerm / tmux)
 
 設計 SoT: [`docs/design/renga-decoupling.md`](../docs/design/renga-decoupling.md)
-§4 (broker / adapter 設計)・§7.1 (Phase 1 AC)。
+§4 (broker / adapter 設計)・§7.1 (Phase 1 AC)・§4.7 (backend 能力表)。
 
 このディレクトリは**使い捨て前提のスパイク**であり、本体の実装ではない
 (broker / adapter の実体は Phase 3 以降に claude-org-runtime 側へ置く計画)。
 本体の `.state/` / ポート / workers_dir には一切触れない (自己完結)。
 
+- **Phase 1**: org-broker + WezTerm adapter (Windows)。AC-1 / AC-2 green。
+- **Phase 2** (Issue #2): tmux adapter (POSIX 正準 backend) を第二実装として追加し、
+  ハーネスを backend パラメータ化。POSIX (tmux/WSL2) と Windows (WezTerm) の両 backend で
+  AC-1 / AC-2 green。詳細は [`RESULTS.md`](./RESULTS.md) の Phase 2 節。
+
 ## 構成
 
 | ファイル | 役割 |
 |---|---|
-| `broker.py` | org-broker プロトタイプ。localhost (127.0.0.1) HTTP MCP サーバー + per-agent token 認証 + broker queue store + ナッジ配達 (静止確認 defer)。Python stdlib のみ |
-| `wezterm_adapter.py` | WezTerm terminal adapter 最小実装 (spawn / send-text / get-text / list の 4 面、`--pane-id` 全呼出明示) + 画面状態ヒューリスティック |
-| `harness.py` | AC 検証ハーネス (broker + adapter + 実 Claude TUI の結線、起動プロンプト機械承認) |
-| `mcp_smoke_test.py` | MCP プロトコル層の合成クライアント検証 (Claude 不要・無課金) |
-| `run_ac2.py` | AC-2 (起動・接続チェーン) 自動検証 |
-| `run_ac1.py` | AC-1 のうち自動 3 状態 (idle / 長文入力中 / ストリーミング中) の自動判定 |
+| `broker.py` | org-broker プロトタイプ。localhost (127.0.0.1) HTTP MCP サーバー + per-agent token 認証 + broker queue store + ナッジ配達 (静止確認 defer)。Python stdlib のみ。backend 非依存 |
+| `terminal_adapter.py` | **backend 共有基盤**。`TerminalAdapter` Protocol (intent 面: spawn / get_text / type_text / send_enter / send_line / send_interrupt / kill_pane / list_panes) + `classify_pane_state` (画面状態ヒューリスティック、backend 非依存) + `make_adapter(backend)` ファクトリ + `NUDGE_TEXT` / `PaneRef` |
+| `wezterm_adapter.py` | WezTerm terminal adapter (spawn / send-text / get-text / list、`--pane-id` 全呼出明示)。Enter/Ctrl+C は send-text の小細工 (`--no-paste` + CR/ETX) で出す |
+| `tmux_adapter.py` | tmux terminal adapter (spawn=new-session / send-keys / capture-pane / list-panes、target `%N` 明示)。Enter/Ctrl+C/1 行は一級 `send-keys` で素直に出す。専用 socket `-L claude-org-spike` で既存 tmux サーバーと分離。`python tmux_adapter.py` で無課金の自己診断 (cat を spawn) |
+| `harness.py` | AC 検証ハーネス (broker + adapter + 実 Claude TUI の結線、起動プロンプト機械承認)。`SpikeSession(..., backend=...)` で backend 選択 |
+| `mcp_smoke_test.py` | MCP プロトコル層の合成クライアント検証 (Claude 不要・無課金、backend 非依存) |
+| `run_ac2.py` | AC-2 (起動・接続チェーン) 自動検証。`--backend {wezterm,tmux}` |
+| `run_ac1.py` | AC-1 のうち自動 3 状態 (idle / 長文入力中 / ストリーミング中) の自動判定。`--backend {wezterm,tmux}` |
 | `manual-ime-test.md` | AC-1 状態 2 (IME 変換中) の手動テスト手順書 |
 | `manual_ime_session.py` | 同手動テスト用の対話セッション起動スクリプト |
 | `probe_startup.py` | TUI 描画採取用 probe (較正用・使い捨て) |
-| `RESULTS.md` | AC 判定結果の記録 (go/no-go) |
+| `RESULTS.md` | AC 判定結果の記録 (go/no-go)。Phase 1 (WezTerm) + Phase 2 (tmux) |
 | `broker-state/` | broker queue store + 画面ダンプ等の実行時生成物 (git 管理外) |
+
+## backend 選択
+
+`--backend {wezterm,tmux}` で明示。省略時は OS から自動選択する
+(POSIX = tmux / Windows = wezterm。環境変数 `SPIKE_BACKEND` でも上書き可)。
+
+- **tmux** (POSIX 正準 backend): tmux 3.4+ / `claude` CLI / Python 3.x。
+  detached session で動くため GUI / display は不要 (WSL2 / Linux / macOS / CI 向き)。
+- **WezTerm** (Windows): WezTerm (20240203-110809 以降) / `claude` CLI。
+  PATH に無い場合は `C:\Program Files\WezTerm\wezterm.exe` を自動で使う。
 
 ## 実行手順
 
-前提: Windows / WezTerm (20240203-110809 以降) / `claude` CLI / Python 3.x (`py -3`)。
-WezTerm が PATH に無い場合は `C:\Program Files\WezTerm\wezterm.exe` を自動で使う。
-
-```powershell
+```bash
 cd spike
 
-# 1. プロトコル層 (無課金・Claude 不要)
-py -3 mcp_smoke_test.py
+# 1. プロトコル層 (無課金・Claude 不要・backend 非依存)
+python mcp_smoke_test.py
 
-# 2. AC-2: 起動・接続チェーン (対話型 Claude TUI を新規 WezTerm ウィンドウに spawn)
-py -3 run_ac2.py
+# --- POSIX (tmux) ---
+python run_ac2.py --backend tmux   # AC-2: 起動・接続チェーン (detached tmux session に spawn)
+python run_ac1.py --backend tmux   # AC-1 自動 3 状態
+python tmux_adapter.py             # tmux adapter の無課金自己診断 (cat を spawn)
 
-# 3. AC-1 自動 3 状態
-py -3 run_ac1.py
+# --- Windows (WezTerm) — PowerShell では py -3 ---
+py -3 run_ac2.py --backend wezterm # AC-2: 新規 WezTerm ウィンドウに spawn
+py -3 run_ac1.py --backend wezterm # AC-1 自動 3 状態
 
-# 4. AC-1 状態 2 (IME) — 手動。manual-ime-test.md の手順に従う
+# AC-1 状態 2 (IME) — 手動。manual-ime-test.md の手順に従う
 py -3 manual_ime_session.py
 ```
 
 - spawn される Claude は**対話型 TUI セッションのみ** (`claude -p` / headless は
   課金制約により禁止。設計書 §1-1)。検証対話は最小トークン。
 - 検証用 Claude は CLAUDE.md の無い一時 scratch ディレクトリ
-  (`%TEMP%\broker-spike-*`) で spawn される (リポジトリの secretary CLAUDE.md を
-  継承させないため)。
+  (`tempfile.mkdtemp(prefix="broker-spike-")`、POSIX では `/tmp/broker-spike-*`、
+  Windows では `%TEMP%\broker-spike-*`) で spawn される (リポジトリの secretary
+  CLAUDE.md を継承させないため)。
 - 各スクリプトは終了時に検証 pane を kill する。失敗時の画面ダンプは
   `broker-state/{ac1,ac2}/screen-*.txt` に残る。
 
@@ -83,5 +101,7 @@ py -3 manual_ime_session.py
 
 - broker は OS が割り当てる空きポート (port=0) で起動し、固定ポートを占有しない。
 - 書き込みは `spike/broker-state/` のみ。本体の `.state/` / state.db には触れない。
-- 検証 pane は新規 WezTerm ウィンドウに spawn し、既存の renga 組織ペインには
-  触れない (adapter は自分が spawn した pane_id のみ操作する)。
+- 検証 pane は隔離環境に spawn し、既存の renga 組織ペインには触れない
+  (adapter は自分が spawn した pane_id のみ操作する)。WezTerm は新規ウィンドウ、
+  tmux は専用 socket (`-L claude-org-spike`) 上の新規 detached session を使い、
+  既存 tmux サーバーとも分離する。

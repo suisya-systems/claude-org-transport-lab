@@ -1,4 +1,10 @@
-# Phase 1 スパイク AC 判定結果
+# スパイク AC 判定結果
+
+Phase 1（WezTerm / Windows）と Phase 2（tmux / POSIX）の AC 判定を記録する。
+**Phase 2 の結果は本ファイル末尾の [Phase 2 節](#phase-2-tmux-backend--posix-wsl2--issue-2) を参照。**
+以下はまず Phase 1（WezTerm）の記録。
+
+## Phase 1 スパイク AC 判定結果（WezTerm / Windows）
 
 - 実施日: 2026-06-08
 - 環境: Windows 11 Pro (10.0.22631) / WezTerm 20240203-110809-5046fc22 /
@@ -82,9 +88,78 @@
 5. **MCP 応答は plain `application/json` で受理される** (SSE 不要)。
    `notifications/initialized` は 202 空応答が正解 (JSON-RPC 応答を返さない)。
 
-## 総合判定
+## 総合判定（Phase 1 / WezTerm）
 
 - **AC-2: GO** (4 項目 + 一往復すべて成立)
 - **AC-1: 全 4 状態 GO**。自動 3 状態 (idle / 長文入力中 / ストリーミング中) +
   手動状態 2 (IME 変換中、2026-06-08 窓口 + ユーザー実施) がすべて合格。
 - **Phase 1 ゲート通過** (AC-1 / AC-2 両方クリア)。Phase 2 へ進行可能。
+
+---
+
+## Phase 2 (tmux backend / POSIX WSL2 / Issue #2)
+
+- 実施日: 2026-06-09
+- 環境: WSL2 (Linux 6.6 / Ubuntu) / **tmux 3.4** / Claude Code (PATH の `claude`) /
+  検証モデル: Sonnet / 検証用 Python: claude-org-ja の `.venv` (CPython 3.x)
+- backend 抽象化: Phase 1 の WezTerm 専用ハーネスを backend パラメータ化した。
+  共有面は [`terminal_adapter.py`](./terminal_adapter.py)（`TerminalAdapter` Protocol /
+  `classify_pane_state` / `make_adapter` ファクトリ）に集約し、
+  [`tmux_adapter.py`](./tmux_adapter.py) を第二実装として追加。
+  `broker.py` / `harness.py` / `run_ac1.py` / `run_ac2.py` は backend 非依存化し、
+  `--backend {wezterm,tmux}`（省略時は OS 自動: POSIX=tmux / Windows=wezterm）で切替。
+- 判定スクリプト: `python mcp_smoke_test.py`（無課金）/
+  `python run_ac2.py --backend tmux`（14:48 run）/
+  `python run_ac1.py --backend tmux`（14:49 run）。
+  機械可読データは `broker-state/{ac2,ac1}/result.json`（git 管理外、再実行で再生成可、`backend` フィールドに `TmuxAdapter` を記録）。
+
+### tmux backend が WezTerm より素直な点（Issue #2 の活用ポイント）
+
+| 操作 | WezTerm | tmux | 効果 |
+|---|---|---|---|
+| Enter（承認 / submit） | `send-text --no-paste` + `\r` | `send-keys Enter` | 小細工不要 |
+| Ctrl+C（入力クリア） | `send-text --no-paste` + `\x03` | `send-keys C-c` | 小細工不要 |
+| 1 行ナッジ注入 | paste + settle + CR | `send-keys -l -- <text>` + `Enter` | 一級プリミティブ |
+| cursor 位置取得 | `get-text` 単体では不可（要別取得） | `list-panes -F` の `#{cursor_x/y}` に同梱 | tmux 優位 |
+| GUI / display | mux-server のみで spawn 可 | detached session で標準動作 | tmux は CI 向き |
+
+未送信複数行テキスト（AC-1 状態 3）のみ bracketed paste（tmux `paste-buffer -p`）を使う。
+これは「改行を行ごとの submit に化けさせない」ための処理で、WezTerm でも同じ理由で必要（backend 差ではなく TUI 入力欄のセマンティクス）。`classify_pane_state` は受信側の Claude TUI が同一描画のため backend 非依存に共有でき、tmux `capture-pane` の scrape でも妥当だった（実測）。
+
+### AC-2: 起動・接続チェーンの置き換え成立（tmux）— **総合 GO**
+
+| # | 項目 | 判定 | 根拠 |
+|---|---|---|---|
+| 1 | `--mcp-config` 注入で spawn した対話ペインの Claude が broker MCP に接続。信頼確認は機械承認可能 | **GO** | detached tmux session に Claude TUI を spawn → initialize 到達。folder trust prompt が出現し `send-keys Enter` で機械承認。MCP trust prompt は出現せず（`--strict-mcp-config` 整合） |
+| 2 | per-agent token の受け渡し・認証成立、from 帰属が token 由来 | **GO** | 検証 Claude が `send_message` を呼び、observer 受信の `from_id='claude-spike'` が token bind 表由来 |
+| 3 | 登録検知が 〜30 秒で成立 | **GO** | spawn から **2.0 秒**で initialize 到達 → bind 表 registered |
+| 4 | PTY send-text に文字化け・取りこぼしなし | **GO** | probe `日本語テスト：ConPTY経由①②③ｱｲｳ🎌𠮷`（全角記号 / 半角カナ / 絵文字 / サロゲートペア）が入力欄に無傷で出現（tmux `paste-buffer` の UTF-8 ラウンドトリップ） |
+| - | (追加検証) ナッジ → `check_messages` 一往復 | **GO** | observer → enqueue → `send-keys` ナッジ → Claude が `check_messages` で本文取得（queue_drained）。本文は PTY 非経由 |
+
+### AC-1: ナッジ注入の状態テスト（tmux）— **自動 3 状態 GO**
+
+| # | 受信側の状態 | 判定 | 根拠 |
+|---|---|---|---|
+| 1 | idle | **GO** | defer 0 回で即時配達。ナッジが 1 メッセージとして履歴に出現、画面・履歴に乱れなし |
+| 2 | IME 変換中 | **対象外（自動）** | Phase 1 と同じく自動化不能（grid scrape は PTY 文字 grid のみ観測し IME 変換窓・候補 UI を観測できない）。手動手順 [`manual-ime-test.md`](./manual-ime-test.md)。WSL2/tmux の手動 IME 検証は別途（窓口判断）|
+| 3 | 長文入力中（未送信複数行） | **GO** | 静止確認が `input_pending` を検知し defer（早漏配達 0 件）。未送信テキスト無傷・ナッジ混入なし・勝手送信なし。クリア後に配達（defer-then-deliver 成立） |
+| 4 | 出力ストリーミング中 | **GO** | busy 中は defer（state=busy の defer を journal で確認）。早漏配達 0 件（`nudge_sent` の ts と busy 終了時刻の比較）。出力末尾無傷。応答完了後にナッジ配達 → drain 成立 |
+
+## 総合判定（Phase 2 / tmux）
+
+- **AC-2: GO**（4 項目 + 一往復すべて成立、tmux 3.4 / WSL2）。
+- **AC-1: 自動 3 状態 GO**（idle / 長文入力中 / ストリーミング中）。状態 2（IME 変換中）は
+  Phase 1 同様に自動化対象外（手動）。
+- **完了基準達成**: POSIX（tmux）/ Windows（WezTerm）の両 backend で AC-1（自動 3 状態）/
+  AC-2 が green。能力表（[`docs/design/renga-decoupling.md`](../docs/design/renga-decoupling.md) §4.7）を
+  実測値に固定し、messaging（Phase 3）/ full backend（Phase 4）の能力境界を 2 表に分離（§4.7.2）。
+
+### 既知制限（Phase 2）
+
+- **IME 状態 2 の tmux 手動検証は未実施**: 自動化不能の根拠は backend 非依存で不変。WSL2/Linux の
+  日本語 IME 環境での手動実機確認は本タスクのスコープ外（窓口判断）。Phase 1 で Windows/Microsoft IME での
+  手動合格は記録済み。
+- **full backend tier（Phase 4 面）は未検証**: 本スパイクが両 backend で実証したのは
+  messaging tier（send-text + grid scrape + 起動チェーン）。spawn / inspect_pane / poll_events の
+  配線替えと実効遅延は Phase 4 スコープ（§4.7.2 (b)）。
+- **codex セルフレビューの追レビュー範囲**: 本 Phase 2 差分のレビューは PR 本文に記載。

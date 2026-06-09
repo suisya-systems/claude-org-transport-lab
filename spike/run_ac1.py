@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from harness import AGENT_ID, SpikeSession, log  # noqa: E402
-from wezterm_adapter import NUDGE_TEXT  # noqa: E402
+from terminal_adapter import NUDGE_TEXT  # noqa: E402
 
 OUT = Path(__file__).parent / "broker-state" / "ac1"
 OUT.mkdir(parents=True, exist_ok=True)
@@ -58,8 +58,9 @@ def wait_event(s: SpikeSession, n0: int, name: str, timeout: float = 90.0, pred=
     return None
 
 
-def main() -> int:
-    s = SpikeSession(state_dir=OUT / "state")
+def main(backend: str | None = None) -> int:
+    s = SpikeSession(state_dir=OUT / "state", backend=backend)
+    log(f"backend = {s.adapter.__class__.__name__}")
     s.start()
     s.spawn_claude()
     try:
@@ -203,6 +204,7 @@ def finish(s: SpikeSession, code: int) -> int:
         json.dumps(
             {
                 "ran_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "backend": s.adapter.__class__.__name__,
                 "results": results,
                 "go_3states": all(r["go"] for r in results.values()) and bool(results),
                 "note": "状態 2 (IME 変換中) は手動: spike/manual-ime-test.md",
@@ -218,4 +220,12 @@ def finish(s: SpikeSession, code: int) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    import argparse
+
+    ap = argparse.ArgumentParser(description="AC-1 自動 3 状態判定 (backend 選択可)")
+    ap.add_argument(
+        "--backend", choices=("wezterm", "tmux"), default=None,
+        help="terminal backend (省略時は OS から自動: POSIX=tmux / Windows=wezterm)",
+    )
+    ns = ap.parse_args()
+    sys.exit(main(backend=ns.backend))
