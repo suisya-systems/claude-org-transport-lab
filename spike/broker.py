@@ -88,6 +88,25 @@ class AgentBind:
     session_id: str | None = None
     summary: str = ""
     revoked: bool = False
+    revoked_reason: str | None = None   # pane_exited / close_pane / suspend / 明示
+    issued_at: float | None = None
+    expires_at: float | None = None     # TTL 失効刻 (None=失効なし)。§4.4 の保険
+
+    def is_active(self, now: float | None = None) -> bool:
+        """revoke も TTL 失効もしていない = 帰属・配送・公開面の有効判定。"""
+        if self.revoked:
+            return False
+        if self.expires_at is not None and (now or time.time()) >= self.expires_at:
+            return False
+        return True
+
+    def auth_error(self, now: float | None = None) -> str | None:
+        """無効時のエラーコード (設計書 §5 Surface 6 の新設語彙)。有効なら None。"""
+        if self.revoked:
+            return "token_revoked"
+        if self.expires_at is not None and (now or time.time()) >= self.expires_at:
+            return "token_expired"
+        return None
 
 
 class Broker:
@@ -101,6 +120,7 @@ class Broker:
         port: int = 0,
         nudge_defer_interval: float = 2.0,
         nudge_defer_max_tries: int = 30,
+        default_token_ttl: float | None = None,
     ):
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -109,6 +129,9 @@ class Broker:
         self.port = port
         self.nudge_defer_interval = nudge_defer_interval
         self.nudge_defer_max_tries = nudge_defer_max_tries
+        # 既定 TTL (None=失効なし)。§4.4 はセッション寿命より長い TTL を基本とし、
+        # TTL は失効漏れの保険。issue_token に明示 ttl があればそちらを優先。
+        self.default_token_ttl = default_token_ttl
 
         self._lock = threading.Lock()
         self._binds: dict[str, AgentBind] = {}        # token -> bind
@@ -158,17 +181,134 @@ class Broker:
 
     # ----------------------------------------------------------------- token
     def issue_token(
-        self, agent_id: str, name: str, role: str, pane_id: PaneId | None = None
+        self,
+        agent_id: str,
+        name: str,
+        role: str,
+        pane_id: PaneId | None = None,
+        ttl: float | None = None,
     ) -> str:
-        """spawn 時の per-agent token 発行 (設計書 §4.4)。"""
+        """spawn 時の per-agent token 発行 (設計書 §4.4)。
+
+        ttl を与えると発行時刻 + ttl 秒で失効する (None=失効なし)。設計書 §4.4 は
+        「セッション寿命より長い TTL + 退役時 revoke」を基本とし、TTL は失効漏れの
+        保険と位置付ける。suspend/resume をまたいだ token 再利用は不可 (resume は
+        本メソッドの再呼出で別 token を再発行する。旧 token は revoke 済みのまま)。
+        """
+        ttl = self.default_token_ttl if ttl is None else ttl
+        now = time.time()
         token = secrets.token_urlsafe(32)
         with self._lock:
             self._binds[token] = AgentBind(
-                token=token, agent_id=agent_id, name=name, role=role, pane_id=pane_id
+                token=token, agent_id=agent_id, name=name, role=role, pane_id=pane_id,
+                issued_at=now,
+                expires_at=(now + ttl) if ttl is not None else None,
             )
             self._queues.setdefault(agent_id, [])
-        self._journal("token_issued", agent_id=agent_id, role=role, pane_id=pane_id)
+        self._journal(
+            "token_issued", agent_id=agent_id, role=role, pane_id=pane_id,
+            ttl=ttl,
+        )
         return token
+
+    # --------------------------------------------------------- token lifecycle
+    def authorize(self, token: str) -> tuple[AgentBind | None, str | None]:
+        """token を分類して (bind, error_code) を返す (設計書 §4.4 / §5 Surface 6)。
+
+        error_code: None(有効) / "token_invalid"(未知) / "token_revoked"(失効) /
+        "token_expired"(TTL 超過)。HTTP ハンドラと直呼び両方の単一権限判定点。
+        """
+        with self._lock:
+            bind = self._binds.get(token)
+            if bind is None:
+                return None, "token_invalid"
+            err = bind.auth_error()
+            if err is not None:
+                return None, err
+            return bind, None
+
+    def revoke_token(self, token: str, reason: str = "revoked") -> bool:
+        """token を即時失効させる。冪等 (既失効は False)。
+
+        失効と同時に session / 登録も落とし、list_peers・配送先・以後の MCP 呼出
+        から構造的に排除する。子プロセスに env が漏れていても以後使えない (§4.4)。
+        """
+        with self._lock:
+            bind = self._binds.get(token)
+            if bind is None or bind.revoked:
+                return False
+            bind.revoked = True
+            bind.revoked_reason = reason
+            bind.registered = False
+            bind.session_id = None
+            agent_id = bind.agent_id
+        self._journal("token_revoked", agent_id=agent_id, reason=reason)
+        return True
+
+    def revoke_pane(self, pane_id: PaneId, reason: str = "pane_exited") -> list[str]:
+        """指定 pane に bind された全 token を revoke する (pane 退役 / close_pane)。"""
+        with self._lock:
+            tokens = [
+                b.token for b in self._binds.values()
+                if b.pane_id == pane_id and not b.revoked
+            ]
+        revoked: list[str] = []
+        for t in tokens:
+            if self.revoke_token(t, reason=reason):
+                with self._lock:
+                    revoked.append(self._binds[t].agent_id)
+        return revoked
+
+    def reap_exited_panes(self) -> list[str]:
+        """adapter で退役した pane を検出し、その token を revoke する (§4.4)。
+
+        正規の pane_exited イベント経路 (Phase 4 の poll_events) の messaging 段階での
+        代替。dispatcher 監視ループ等から定期的に呼ぶ想定。adapter 不通時は誤 revoke を
+        避けるため何もしない (生存判定不能を「退役」と扱わない)。戻り値: revoke した agent_id。
+        """
+        if self.adapter is None:
+            return []
+        with self._lock:
+            bound = [
+                (b.token, b.pane_id) for b in self._binds.values()
+                if b.pane_id is not None and not b.revoked
+            ]
+        revoked: list[str] = []
+        for token, pane_id in bound:
+            try:
+                alive = self.adapter.pane_exists(pane_id)
+            except Exception:
+                continue  # adapter 不通 = 生存判定不能。誤 revoke しない
+            if not alive and self.revoke_token(token, reason="pane_exited"):
+                with self._lock:
+                    revoked.append(self._binds[token].agent_id)
+        return revoked
+
+    def close_pane(self, pane_id: PaneId) -> list[str]:
+        """broker 経由の pane クローズ + 即時 revoke (§4.4)。
+
+        adapter で pane を kill し、その pane の token を revoke する。pane 操作は
+        Phase 4 で MCP 公開 (worker/curator 非公開) する面なので、ここでは broker
+        内部 API として置く (messaging Phase のライフサイクル検証用)。
+        """
+        if self.adapter is not None:
+            try:
+                self.adapter.kill_pane(pane_id)
+            except Exception as e:
+                self._journal("close_pane_failed", pane_id=pane_id, error=str(e))
+        return self.revoke_pane(pane_id, reason="close_pane")
+
+    def suspend(self) -> int:
+        """全 token を revoke する (/org-suspend 相当、§4.4)。
+
+        resume 時は issue_token の再呼出で別 token を再発行する (suspend をまたいだ
+        token 再利用は不可)。戻り値: revoke した token 数。
+        """
+        with self._lock:
+            tokens = [t for t, b in self._binds.items() if not b.revoked]
+        n = sum(1 for t in tokens if self.revoke_token(t, reason="suspend"))
+        self._journal("broker_suspended", revoked=n)
+        return n
 
     def bind_pane(self, token: str, pane_id: PaneId) -> None:
         with self._lock:
@@ -200,7 +340,7 @@ class Broker:
     def get_bind(self, token: str) -> AgentBind | None:
         with self._lock:
             bind = self._binds.get(token)
-            if bind and not bind.revoked:
+            if bind and bind.is_active():
                 return bind
             return None
 
@@ -208,7 +348,7 @@ class Broker:
         """list_peers 相当の登録検知 (AC-2-3)。bind 表ベース。"""
         with self._lock:
             for b in self._binds.values():
-                if b.agent_id == agent_id and b.registered and not b.revoked:
+                if b.agent_id == agent_id and b.registered and b.is_active():
                     return b
         return None
 
@@ -221,13 +361,23 @@ class Broker:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     def enqueue(self, from_bind: AgentBind, to_id: str, message: str) -> dict:
-        """queue store 投入 + ナッジ配達 trigger。帰属は token 由来 (自己申告不可)。"""
+        """queue store 投入 + ナッジ配達 trigger。帰属は token 由来 (自己申告不可)。
+
+        from_bind は呼出元の bind であり、`from_id` / `from_name` はここから付与する
+        (クライアント自己申告フィールドは一切採らない = なりすまし構造的不可、§4.4)。
+        直呼び経路でも送信者 token が失効していれば送れない (HTTP 経路は authorize で
+        既に弾かれるが、直呼びの revoke/expire テストを意味あるものにするための保険)。
+        """
+        sender_err = from_bind.auth_error()
+        if sender_err is not None:
+            return {"ok": False, "error": f"[{sender_err}] sender token not active"}
         with self._lock:
             target: AgentBind | None = None
             for b in self._binds.values():
-                # registered な bind のみ配送先にする (未接続 / DELETE 済み
-                # client への配送を防ぐ。codex review round 3 Major 対応)
-                if b.revoked or not b.registered:
+                # registered かつ有効 (未失効 / TTL 内) な bind のみ配送先にする
+                # (未接続 / DELETE 済み / revoke 済み client への配送を防ぐ。
+                #  codex review round 3 Major 対応 + Phase 3 ライフサイクル)
+                if not b.is_active() or not b.registered:
                     continue
                 if b.agent_id == to_id or b.name == to_id:
                     target = b
@@ -345,7 +495,7 @@ class Broker:
                             "summary": b.summary,
                         }
                         for b in self._binds.values()
-                        if b.registered and not b.revoked
+                        if b.registered and b.is_active()
                     ]
                 }
         elif name == "set_summary":
@@ -426,14 +576,15 @@ class _McpHandler(BaseHTTPRequestHandler):
         # --- 認証 (per-agent token, 設計書 §4.4) -------------------------
         auth = self.headers.get("Authorization", "")
         token = auth.removeprefix("Bearer ").strip() if auth.startswith("Bearer ") else ""
-        bind = self.broker.get_bind(token)
+        bind, auth_err = self.broker.authorize(token)
         if bind is None:
+            # auth_err: token_invalid(未知) / token_revoked(失効) / token_expired(TTL)
             self._send_json(
                 401,
                 {
                     "jsonrpc": "2.0",
                     "id": None,
-                    "error": {"code": -32001, "message": "[token_invalid] unauthorized"},
+                    "error": {"code": -32001, "message": f"[{auth_err}] unauthorized"},
                 },
             )
             return

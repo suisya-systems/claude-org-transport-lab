@@ -163,3 +163,69 @@ Phase 1（WezTerm / Windows）と Phase 2（tmux / POSIX）の AC 判定を記�
   messaging tier（send-text + grid scrape + 起動チェーン）。spawn / inspect_pane / poll_events の
   配線替えと実効遅延は Phase 4 スコープ（§4.7.2 (b)）。
 - **codex セルフレビューの追レビュー範囲**: 本 Phase 2 差分のレビューは PR 本文に記載。
+
+---
+
+## Phase 3（メッセージング移行 / broker 配線 / Issue #3）
+
+- 実施日: 2026-06-09
+- 環境: WSL2（Linux 6.6）/ Python 3.x（claude-org-ja `.venv`）/ 検証モデル: Opus
+- 検証方式: **B（broker queue 統合ハーネス / 無課金・決定的・CI 可）**。窓口経由のユーザー判断
+  （2026-06-09）。実 Claude 4 ペインの課金実証（方式 A）や本体取り込みスコープの prose 書き換えは
+  行わない。実セッション往復のリアルさ（PTY ナッジ打鍵・起動チェーン・UTF-8 文字化けなし）は
+  Phase 1/2 の AC-1 / AC-2 が実 Claude TUI で既証（本ファイル上記）。Phase 3 は「broker 側が
+  full cycle を構造的に支えられること」を [`run_ac3.py`](./run_ac3.py)（FakeAdapter で受信側の
+  idle/busy/input_pending と pane 生死を決定的に駆動）で実証する。
+- 判定スクリプト: `python run_ac3.py`（GO/NO-GO + `broker-state/ac3/result.json`）。
+  CI 常設: [`tests/test_broker_phase3.py`](../tests/test_broker_phase3.py)（`unittest discover -s tests`
+  が拾う。14 ケース green）。
+- 実装差分: [`broker.py`](./broker.py) に token ライフサイクル本実装（`issue_token(ttl=)` /
+  `authorize` / `revoke_token` / `revoke_pane` / `reap_exited_panes` / `close_pane` / `suspend`、
+  新エラーコード `token_revoked` / `token_expired`）。`AgentBind` に `expires_at` / `revoked_reason` /
+  `is_active()` / `auth_error()` を追加。
+
+### AC-3: メッセージング移行の 1 委譲サイクル完走 — **総合 GO**
+
+| # | 項目 | 判定 | 根拠 |
+|---|---|---|---|
+| AC-3-cycle | 6 経路全数往復 + token 由来 from 帰属 | **GO** | DELEGATE（secretary→dispatcher）/ ack（secretary→worker）/ 完了報告（worker→secretary）/ 判断仰ぎ（worker→secretary）/ CURATE_DONE（curator→dispatcher）/ retro gate（dispatcher→secretary）の 6 経路を 4 役割 token bind で全数往復。各 `from_id` が token bind 由来で正しく、ナッジ配達 + at-most-once drain（2 回目空）が全経路で成立 |
+| AC-3-nudge | 静止確認 defer が busy / input_pending と共存、静止後配達 | **GO** | busy / input_pending の宛先で defer を 3 回記録 → idle 遷移後に `nudge_sent` 1 回・打鍵行が `NUDGE_TEXT`（本文は PTY 非経由）。idle 宛は defer 0 回で即時配達。早漏配達は構造的に不可（`_nudge_worker` は classify==idle のときのみ `send_line`） |
+| AC-3-spoof | なりすまし送信が構造的に不可能 | **GO** | `call_tool` の arguments に `from_id` / `from_name` を偽装注入しても broker は token bind 由来で上書きし無視。`enqueue` 署名は `from_bind`（token 由来）のみで自己申告 from 文字列を受けない。revoke 済み token での送信は `[token_revoked]` で拒否 |
+| AC-3-lifecycle | token ライフサイクル本実装 | **GO** | pane_exited（`reap_exited_panes`）/ `close_pane` で即時 revoke → 以後 `token_revoked` で全呼出拒否・list_peers / 配送先から消滅。TTL 超過で `token_expired`。`suspend` で全 token revoke → resume は別 token を再発行（旧 token 再利用不可、bind 表整合） |
+
+### 帰属（なりすまし不可能性）の構造的根拠
+
+- `enqueue(from_bind, to_id, message)` は **送信者の token bind のみ**を受け、`from_id` / `from_name` /
+  `sent_at` を bind から付与する。クライアント自己申告フィールドを採る経路が API 署名レベルで存在しない。
+- `to_id` は宛先解決にのみ使われ、`from` には一切影響しない（「他 agent の to_id を騙る」試行をしても、
+  付与される from は常に送信者 token の agent_id）。
+- 不正 / 失効 / TTL 超過 token は `authorize()` が HTTP 層（`do_POST`）で 401 + `[token_*]` として弾く。
+  直呼び経路（server-side 合成役割）でも `enqueue` 冒頭の `from_bind.auth_error()` で失効送信者を拒否する。
+
+### attention watcher 通知経路（§7.3 の「壊れないこと」）
+
+- attention watcher（`/org-attention-start`）は **`.state/attention.json` / pending_decisions を監視して
+  OS 通知する独立サイドカー**であり、renga チャネルのメッセージ注入を消費しない（state ファイル監視）。
+  したがって broker への messaging 配線替えと **直交**しており、watcher 経路は本移行で改変されない。
+- messaging 層で「通知経路が壊れない」に相当する保証は、**判断仰ぎ（escalation）が宛先 busy / 長文入力中でも
+  ナッジ defer-then-deliver で確実に届くこと**であり、AC-3-nudge が実証する。
+
+## 総合判定（Phase 3 / messaging）
+
+- **AC-3: 全 4 項目 GO**（cycle / nudge / spoof / lifecycle）。**完了基準達成**: フォーク組織の
+  messaging 1 委譲サイクル（6 経路）が renga チャネル不使用で broker queue を一巡し、全 from が
+  token 由来で正しく付き、なりすましが構造的に不可能、token ライフサイクル（bind/revoke/TTL/再発行）が
+  本実装で成立。無課金・決定的・CI 可・prose 非破壊の規律を維持。
+
+### 既知制限（Phase 3）
+
+- **方式 B の合成役割**: 4 役割は実 Claude セッションではなく token bind された合成役割（observer と同型）。
+  token bind・帰属・queue・ナッジ機構は本物だが、「実 4 セッションが同時に喋った」課金実証（方式 A）は
+  本体取り込みスコープに送る（ユーザー判断）。実セッション往復の実在性は Phase 2 AC-2 で既証。
+- **prose 書き換え（分類 (a)）・契約改訂（Set D Surface 2/5・Set C inventory・non-goals §12）は未実施**:
+  設計書 §7.3 が「本体取り込み時の同時変更」と位置付ける作業であり、ja 不可触制約（Epic #6 完動ゲート前）
+  により本フォークでは行わない。本 Phase の成果物は broker 側の能力実証に閉じる。
+- **TTL 既定値は None（失効なし）**: 設計書 §4.4 は「セッション寿命より長い TTL + 退役時 revoke」を基本とし
+  TTL を保険と位置付ける。既定は長寿命（None）で、退役 revoke を一次担保とする。実運用 TTL 値の確定は
+  本体取り込み時に行う。
+- **codex セルフレビュー**: 本 Phase 3 差分のレビュー結果は PR 本文 / 完了報告に記載。
