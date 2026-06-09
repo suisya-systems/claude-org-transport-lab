@@ -83,7 +83,11 @@ class SpikeSession:
         self.broker.register_local(self.observer_token)
 
     def spawn_claude(self) -> None:
-        """中立 scratch dir で対話型 Claude TUI を WezTerm 新規ウィンドウに spawn。"""
+        """中立 scratch dir で対話型 Claude TUI を spawn (backend 非依存)。
+
+        backend 差は adapter.spawn が吸収する: WezTerm は新規ウィンドウ、
+        tmux は専用 socket 上の新規 detached session に spawn する。
+        """
         assert self.token is None, "already spawned"
         self.scratch = Path(tempfile.mkdtemp(prefix="broker-spike-"))
         self.token = self.broker.issue_token(AGENT_ID, AGENT_ID, "worker")

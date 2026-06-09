@@ -7,7 +7,7 @@
   AC-2-2: per-agent token の受け渡し・認証が成立し、broker が from 帰属を
           token から正しく付与する。
   AC-2-3: broker の bind 表ベース登録検知が spawn 後 〜30 秒で成立する。
-  AC-2-4: Windows (ConPTY) での send-text に文字化け・取りこぼしがない。
+  AC-2-4: PTY (Windows=ConPTY / POSIX=pty) での send-text に文字化け・取りこぼしがない。
 
 結果は broker-state/ac2/result.json に保存し、RESULTS.md へ転記する。
 """
@@ -25,8 +25,9 @@ from harness import AGENT_ID, OBSERVER_ID, SpikeSession, log  # noqa: E402
 OUT = Path(__file__).parent / "broker-state" / "ac2"
 OUT.mkdir(parents=True, exist_ok=True)
 
-# ConPTY 文字化け検証用 (日本語 + 全角記号 + 半角カナ + 絵文字 + サロゲートペア)
-MOJIBAKE_PROBE = "日本語テスト：ConPTY経由①②③ｱｲｳ🎌𠮷"
+# PTY 文字化け検証用の UTF-8 ストレス文字列 (backend 非依存)。
+# 日本語 + 全角記号 + 半角カナ + 絵文字 + サロゲートペア (𠮷) を含む。
+MOJIBAKE_PROBE = "日本語テスト：PTY経由①②③ｱｲｳ🎌𠮷"
 
 results: dict[str, dict] = {}
 

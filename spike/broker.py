@@ -26,6 +26,7 @@ from pathlib import Path
 
 from terminal_adapter import (
     NUDGE_TEXT,
+    PaneId,
     TerminalAdapter,
     classify_pane_state,
     make_adapter,
@@ -81,7 +82,7 @@ class AgentBind:
     agent_id: str
     name: str
     role: str
-    pane_id: int | None = None
+    pane_id: PaneId | None = None     # backend ネイティブ型 (WezTerm=int / tmux="%N"=str)
     registered: bool = False          # MCP initialize 到達で True (AC-2-3 の検知点)
     registered_at: float | None = None
     session_id: str | None = None
@@ -157,7 +158,7 @@ class Broker:
 
     # ----------------------------------------------------------------- token
     def issue_token(
-        self, agent_id: str, name: str, role: str, pane_id: int | None = None
+        self, agent_id: str, name: str, role: str, pane_id: PaneId | None = None
     ) -> str:
         """spawn 時の per-agent token 発行 (設計書 §4.4)。"""
         token = secrets.token_urlsafe(32)
@@ -169,7 +170,7 @@ class Broker:
         self._journal("token_issued", agent_id=agent_id, role=role, pane_id=pane_id)
         return token
 
-    def bind_pane(self, token: str, pane_id: int) -> None:
+    def bind_pane(self, token: str, pane_id: PaneId) -> None:
         with self._lock:
             self._binds[token].pane_id = pane_id
 

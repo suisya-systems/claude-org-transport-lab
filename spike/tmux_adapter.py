@@ -102,9 +102,24 @@ class TmuxAdapter:
     def list_panes(self) -> list[dict]:
         """`tmux list-panes -a -F` を geometry / cursor 付きで dict 化する。"""
         proc = self._tmux("list-panes", "-a", "-F", _LIST_FMT, check=False)
-        # サーバー上に session が 1 つも無いと list-panes は失敗する (空扱い)
         if proc.returncode != 0:
-            return []
+            # 「サーバー未起動 / session 皆無」だけを空扱いにする。socket 権限・
+            # サーバー異常・format エラー等を一律 [] にすると pane_exists() が
+            # backend unreachable を pane missing と誤判定するため、それ以外は例外。
+            #   - 専用 socket がまだ無い: "error connecting to ... (No such file ...)"
+            #   - サーバーは落ちたが socket 残: "no server running on ..."
+            stderr = (proc.stderr or "").lower()
+            benign = (
+                "no server" in stderr
+                or "error connecting" in stderr
+                or "no such file" in stderr
+                or "no sessions" in stderr
+            )
+            if benign:
+                return []
+            raise RuntimeError(
+                f"tmux list-panes failed ({proc.returncode}): {proc.stderr.strip()}"
+            )
         out: list[dict] = []
         for line in proc.stdout.splitlines():
             if not line.strip():

@@ -133,7 +133,7 @@ Phase 1（WezTerm / Windows）と Phase 2（tmux / POSIX）の AC 判定を記�
 | 1 | `--mcp-config` 注入で spawn した対話ペインの Claude が broker MCP に接続。信頼確認は機械承認可能 | **GO** | detached tmux session に Claude TUI を spawn → initialize 到達。folder trust prompt が出現し `send-keys Enter` で機械承認。MCP trust prompt は出現せず（`--strict-mcp-config` 整合） |
 | 2 | per-agent token の受け渡し・認証成立、from 帰属が token 由来 | **GO** | 検証 Claude が `send_message` を呼び、observer 受信の `from_id='claude-spike'` が token bind 表由来 |
 | 3 | 登録検知が 〜30 秒で成立 | **GO** | spawn から **2.0 秒**で initialize 到達 → bind 表 registered |
-| 4 | PTY send-text に文字化け・取りこぼしなし | **GO** | probe `日本語テスト：ConPTY経由①②③ｱｲｳ🎌𠮷`（全角記号 / 半角カナ / 絵文字 / サロゲートペア）が入力欄に無傷で出現（tmux `paste-buffer` の UTF-8 ラウンドトリップ） |
+| 4 | PTY send-text に文字化け・取りこぼしなし | **GO** | probe `日本語テスト：PTY経由①②③ｱｲｳ🎌𠮷`（全角記号 / 半角カナ / 絵文字 / サロゲートペア）が入力欄に無傷で出現（tmux `paste-buffer` の UTF-8 ラウンドトリップ） |
 | - | (追加検証) ナッジ → `check_messages` 一往復 | **GO** | observer → enqueue → `send-keys` ナッジ → Claude が `check_messages` で本文取得（queue_drained）。本文は PTY 非経由 |
 
 ### AC-1: ナッジ注入の状態テスト（tmux）— **自動 3 状態 GO**
