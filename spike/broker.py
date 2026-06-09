@@ -56,6 +56,23 @@ ROLE_TIER = {
 # spawn_agent が発行できる新 token の role (caller tier 昇格を構造的に禁じる)。
 SPAWNABLE_ROLES = ("worker", "curator")
 
+# 課金中立 (§1.3): spawn する Claude は対話型 TUI のみ。ヘッドレス / Agent-SDK 起動を
+# 構造的に禁じる。spawn_agent はこれらの flag を含む argv を `[headless_forbidden]` で拒否し、
+# 「ヘッドレスに落ちない」を caller 任せではなく broker が強制する (AC-5 課金中立)。
+# 完全一致で弾く flag と、`=value` 形を吸収する prefix の 2 系統で判定する。
+_HEADLESS_EXACT = frozenset(("-p", "--print", "--headless"))
+_HEADLESS_PREFIX = ("--output-format", "--input-format", "--print=")
+
+
+def is_interactive_argv(argv: list[str]) -> bool:
+    """argv が対話 TUI 起動か (ヘッドレス / print / Agent-SDK 系 flag を含まない)。"""
+    for tok in argv:
+        if tok in _HEADLESS_EXACT:
+            return False
+        if any(tok.startswith(p) for p in _HEADLESS_PREFIX):
+            return False
+    return True
+
 
 def role_tier(role: str) -> int:
     return ROLE_TIER.get(role, TIER_MESSAGING)
@@ -1002,6 +1019,12 @@ class Broker:
         if role not in SPAWNABLE_ROLES:
             return {"ok": False,
                     "error": f"[invalid-params] role must be one of {SPAWNABLE_ROLES}"}
+        # 課金中立 (§1.3): caller argv にヘッドレス / print / Agent-SDK 系 flag があれば拒否する。
+        # 「対話 TUI のみ・ヘッドレスに落ちない」を broker が構造的に強制する (caller 任せにしない)。
+        if not is_interactive_argv(argv):
+            return {"ok": False,
+                    "error": "[headless_forbidden] argv must launch an interactive TUI "
+                             "(no -p/--print/--headless/--output-format)"}
         # agent_id は per-agent config のファイル名に使う。filename-safe を強制して
         # `../` / 絶対パスで state_dir 外へ token 入り config を書く経路を断つ (codex Major)。
         if not is_filename_safe(agent_id):

@@ -81,6 +81,14 @@ class HeadlessFlagGuardTest(unittest.TestCase):
             self.assertNotIn(sp["token"], argv)
             self.c.broker.close_pane_target(sp["handle"])
 
+    def test_headless_argv_rejected(self) -> None:
+        # 課金中立の構造強制: ヘッドレス / print 系 argv は broker が拒否する。
+        for bad in (["claude", "-p", "x"], ["claude", "--print"], ["claude", "--headless"],
+                    ["claude", "--output-format", "json"], ["claude", "--output-format=json"]):
+            r = self.c.broker.spawn_agent("agent-bad", "agent-bad", "worker", bad)
+            self.assertFalse(r.get("ok"), bad)
+            self.assertIn("[headless_forbidden]", r.get("error", ""), bad)
+
 
 if __name__ == "__main__":
     unittest.main()

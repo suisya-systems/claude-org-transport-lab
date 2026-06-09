@@ -97,11 +97,19 @@ class ReuseFakeAdapter(FakeAdapter):
 # ---------------------------------------------------------------------------
 
 
+_CYCLE_SEQ = [0]  # Cycle ごとに一意な state_dir を割り当てる (test 間の journal 衝突を断つ)
+
+
 class Cycle:
     def __init__(self, adapter=None) -> None:
         self.adapter = adapter if adapter is not None else ReuseFakeAdapter()
+        _CYCLE_SEQ[0] += 1
+        # 各 Cycle に専用 state_dir を与え、queue.jsonl を test/check 間で完全分離する
+        # (共有 dir だと先行 test の lingering nudge thread が journal を汚し escalation 系が
+        #  flaky になりうる。codex Minor 対応)。
+        self.state_dir = OUT / f"state-{_CYCLE_SEQ[0]}"
         self.broker = Broker(
-            state_dir=OUT / "state", adapter=self.adapter,
+            state_dir=self.state_dir, adapter=self.adapter,
             nudge_defer_interval=0.01, nudge_defer_max_tries=200,
             event_poll_interval=0.01,
         )
@@ -126,7 +134,7 @@ class Cycle:
         return None
 
     def journal(self) -> list[dict]:
-        path = OUT / "state" / "queue.jsonl"
+        path = self.state_dir / "queue.jsonl"
         if not path.exists():
             return []
         out = []
@@ -199,6 +207,14 @@ def check_multi(c: Cycle) -> tuple[bool, str]:
         # handle はサイクル毎に必ず新しい (native 再利用でも handle は別採番)
         if prev_worker_handle is not None and wh == prev_worker_handle:
             f.append(f"cycle{k}: handle が前サイクルと重複 (cross-cycle 漏れ): {wh}")
+        # **native 再利用後**も前サイクルの旧 handle は新 pane に誤対応しない (codex Major 対応)。
+        # 同一 native を新 pane が掴んだ今この瞬間に、旧 handle が解決しない/新 pane を指さないことを assる。
+        if k >= 2 and prev_worker_handle is not None:
+            old_insp = c.broker.inspect_pane(prev_worker_handle)
+            if "[pane_not_found]" not in old_insp.get("error", ""):
+                f.append(f"cycle{k}: native 再利用後に前サイクル旧 handle が新 pane に誤対応: {old_insp}")
+            if c.handle_of(wid) == prev_worker_handle:
+                f.append(f"cycle{k}: 新 worker の handle が旧 handle を再利用している (誤対応)")
 
         # pane_started 観測 (このサイクルの cursor 起点で worker のみ)
         ev = c.broker.poll_events(since=cursor, timeout_ms=0)
@@ -384,6 +400,9 @@ def check_escalation(c: Cycle) -> tuple[bool, str]:
     got = c.broker.drain(c.bind("secretary"))
     if not (len(got) == 1 and got[0]["from_id"] == "worker-esc"):
         f.append(f"判断仰ぎが token 由来 from (worker) で届かない: {got}")
+    # 判断仰ぎ自体も at-most-once (secretary 側 2 回目 drain は空)。codex Major 対応
+    if c.broker.drain(c.bind("secretary")):
+        f.append("判断仰ぎの secretary 側 2 回目 drain が空でない (at-most-once 破れ)")
 
     # 人間返答を worker へ broker 経由で転送 → worker 側 at-most-once drain
     c.broker.enqueue(c.bind("secretary"), "worker-esc",
@@ -419,13 +438,23 @@ def check_handover(c: Cycle) -> tuple[bool, str]:
     cursor_before = base["next_since"]  # handover 前 cursor
 
     dh = c.handle_of("dispatcher")
-    # secretary が ops tier で dispatcher の prompt を観測 → /clear → /dispatcher-resume
-    if c.broker.inspect_pane(dh).get("state") not in ("idle", "input_pending", "busy"):
-        f.append("secretary が dispatcher を inspect_pane で観測できない")
-    r1 = c.broker.send_keys_op(dh, text="/clear", enter=True)
-    r2 = c.broker.send_keys_op(dh, text="/dispatcher-resume", enter=True)
+    # secretary token の **ops tier MCP surface (call_tool)** 経由で引き継ぐ (tier 認可も exercise)。
+    # codex Minor 対応: 直呼びではなく secretary bind の call_tool で tier 通過を実証する。
+    sec_bind = c.bind("secretary")
+
+    def _sec_call(tool, args):
+        r = c.broker.call_tool(sec_bind, tool, args)
+        if r.get("isError"):
+            return {"_isError": True, "text": r["content"][0]["text"]}
+        return json.loads(r["content"][0]["text"])
+
+    insp = _sec_call("inspect_pane", {"target": dh})
+    if insp.get("_isError") or insp.get("state") not in ("idle", "input_pending", "busy"):
+        f.append(f"secretary が ops tier で dispatcher を inspect_pane できない: {insp}")
+    r1 = _sec_call("send_keys", {"target": dh, "text": "/clear", "enter": True})
+    r2 = _sec_call("send_keys", {"target": dh, "text": "/dispatcher-resume", "enter": True})
     if not (r1.get("ok") and r2.get("ok")):
-        f.append(f"ops tier send_keys 失敗: {r1} / {r2}")
+        f.append(f"ops tier send_keys (call_tool) 失敗: {r1} / {r2}")
     keys = c.adapter.keys_for("dispatcher")
     if not (any(k["text"] == "/clear" for k in keys)
             and any(k["text"] == "/dispatcher-resume" for k in keys)):
@@ -503,8 +532,16 @@ def check_resume(c: Cycle) -> tuple[bool, str]:
     if leftover:
         f.append(f"suspend 前の未読が新 lifecycle に継承された (stale 漏れ): {leftover}")
 
-    # 新 lifecycle で送受信成立
+    # 新 lifecycle で送受信成立。さらに「旧 token は新 lifecycle の queue を読めない」を
+    # authorized 経路 (get_bind / authorize) で固定する。secretary は resume 後も同一 agent_id
+    # のため queue は agent_id 共有だが、旧 token は revoke 済みで authorized 経路に載らない
+    # (MCP の check_messages は call_tool→authorize で弾かれる)。direct broker.drain() は
+    # server-side 合成経路で auth を見ない設計のため、ここでは認可境界を assert する。codex Major 対応。
     c.broker.enqueue(c.bind("dispatcher"), "secretary", "resume 後の新規メッセージ")
+    if c.broker.get_bind(sec_tok_old) is not None:
+        f.append("旧 token が新 lifecycle で authorized 経路に復活した (stale 読み取り可能)")
+    if c.broker.authorize(sec_tok_old)[0] is not None:
+        f.append("旧 token が authorize を通過する (新 queue への読み取り経路が残る)")
     fresh = c.broker.drain(c.bind("secretary"))
     if not (len(fresh) == 1 and fresh[0]["from_id"] == "dispatcher"
             and "resume 後" in fresh[0]["message"]):
@@ -528,7 +565,7 @@ def check_billing(c: Cycle) -> tuple[bool, str]:
     c.add_role_pane("dispatcher", "dispatcher", 0, 43, 140, 43)
 
     # spawnable role (worker / curator) ごとに argv builder を検査する
-    for i, role in enumerate(SPAWNABLE_ROLES):
+    for role in SPAWNABLE_ROLES:
         wid = f"agent-{role}"
         before = len(c.adapter.split_argv)
         sp = c.broker.spawn_agent(wid, wid, role, ["claude"])
@@ -558,6 +595,17 @@ def check_billing(c: Cycle) -> tuple[bool, str]:
         if not cfg_path.exists():
             f.append(f"{role}: --mcp-config の指す 0600 config が存在しない: {cfg_path}")
         c.broker.close_pane_target(sp["handle"])
+
+    # 課金中立の **構造強制**: ヘッドレス / print / Agent-SDK 系 argv は broker が拒否する
+    # (caller 任せにしない。codex Blocker 対応)。危険入力を実 API で弾けることを assert。
+    for bad_argv in (["claude", "-p", "x"], ["claude", "--print"],
+                     ["claude", "--headless"], ["claude", "--output-format", "json"],
+                     ["claude", "--output-format=json"]):
+        r = c.broker.spawn_agent("agent-bad", "agent-bad", "worker", bad_argv)
+        if r.get("ok") or "[headless_forbidden]" not in r.get("error", ""):
+            f.append(f"ヘッドレス argv {bad_argv} が headless_forbidden で拒否されない: {r}")
+            if r.get("ok"):
+                c.broker.close_pane_target(r["handle"])
 
     go = not f
     detail = ("spawnable 各 role の spawn argv が 'claude --mcp-config <0600 path>' の対話 TUI で、"
@@ -668,7 +716,10 @@ def real_claude_active_cycle() -> tuple[bool, str, dict]:
         argv_lines = _claude_argv_via_ps()
         ev["claude_argv_ps"] = argv_lines
         joined = " ".join(argv_lines)
-        if argv_lines:
+        # ps で実 argv を捕捉できなければ attestation 失敗 (空を素通しさせない。codex Major 対応)
+        if not argv_lines:
+            f.append("実 claude プロセスの argv を ps で捕捉できない (課金中立 attestation 不成立)")
+        else:
             for bad in HEADLESS_FLAGS:
                 if f" {bad}" in joined or joined.endswith(bad):
                     f.append(f"実 claude argv にヘッドレス flag {bad} 混入: {joined}")
@@ -681,9 +732,15 @@ def real_claude_active_cycle() -> tuple[bool, str, dict]:
         ev["registered_seconds"] = s.obs.registered_seconds
         ev["folder_trust_prompt"] = s.obs.folder_trust_prompt
         # --- 課金中立 実測 (a): idle ❯ 到達時の対話 TUI 描画 (turn 未投入) ---
-        ev["idle_screen"] = s.screen()[-1500:]
+        from terminal_adapter import classify_pane_state
+        idle_full = s.screen()
+        ev["idle_screen"] = idle_full[-1500:]
+        ev["idle_screen_state"] = classify_pane_state(idle_full)
         if not ready:
             f.append("実 claude が idle (対話 TUI) に到達しない (150s timeout / ヘッドレス疑い)")
+        elif ev["idle_screen_state"] != "idle":
+            # 保存する証跡自体を機械判定する (wait_ready の過去判定に依存しない。codex Minor 対応)
+            f.append(f"idle attestation 証跡が idle 描画でない: state={ev['idle_screen_state']}")
         if not registered:
             f.append("実 claude が broker に登録しない (30s timeout)")
         if ready and registered:
@@ -788,21 +845,15 @@ CHECKS = [
 
 def run(real_tmux: bool = False) -> dict:
     OUT.mkdir(parents=True, exist_ok=True)
-    qpath = OUT / "state" / "queue.jsonl"
-    if qpath.exists():
-        qpath.unlink()
     results: dict[str, dict] = {}
     for name, fn in CHECKS:
-        c = Cycle()
+        c = Cycle()  # 各 Cycle は専用 state_dir を持つ (journal 分離)
         try:
             go, detail = fn(c)
         finally:
             c.teardown()
         results[name] = {"go": go, "detail": detail}
         log(f"{'GO   ' if go else 'NO-GO'} {name}: {detail}")
-        # 各 check は独立した journal を前提とするため queue.jsonl をリセット
-        if qpath.exists():
-            qpath.unlink()
     if real_tmux:
         go, detail = real_tmux_dogfood()
         results["AC-5-real-tmux"] = {"go": go, "detail": detail}
