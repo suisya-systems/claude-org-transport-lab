@@ -235,6 +235,25 @@ class SpawnInjectionTest(unittest.TestCase):
             self.assertFalse(sp.get("ok"), bad)
             self.assertIn("[name_invalid]", sp.get("error", ""), bad)
 
+    def test_duplicate_agent_id_rejected(self) -> None:
+        # 同一 agent_id の二重 spawn を拒否する (inbox 共有による message 横取り防止)
+        sp1 = self.c.broker.spawn_agent("worker-d", "worker-d", "worker", ["claude"])
+        self.assertTrue(sp1.get("ok"), sp1)
+        self.c.broker.register_local(sp1["token"])
+        sp2 = self.c.broker.spawn_agent("worker-d", "worker-d", "worker", ["claude"])
+        self.assertFalse(sp2.get("ok"))
+        self.assertIn("[name_in_use]", sp2.get("error", ""))
+        # 別名なら spawn できる
+        sp3 = self.c.broker.spawn_agent("worker-e", "worker-e", "worker", ["claude"])
+        self.assertTrue(sp3.get("ok"), sp3)
+
+    def test_filename_safe_rejects_unicode(self) -> None:
+        from broker import is_filename_safe
+        self.assertTrue(is_filename_safe("worker-phase4_1"))
+        self.assertFalse(is_filename_safe("ｗｏｒｋｅｒ"))  # 全角 (Unicode 英数字)
+        self.assertFalse(is_filename_safe("名前"))
+        self.assertFalse(is_filename_safe(""))
+
     def test_split_exception_revokes_token_and_sanitizes(self) -> None:
         # split が例外 → 発行済み token は revoke され、応答に例外文字列を漏らさない
         captured = {}

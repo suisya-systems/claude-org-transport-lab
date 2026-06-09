@@ -61,10 +61,17 @@ def role_tier(role: str) -> int:
     return ROLE_TIER.get(role, TIER_MESSAGING)
 
 
+# ASCII の `[A-Za-z0-9_-]` のみを許す集合。str.isalnum() は Unicode 英数字も通すため
+# 明示集合で ASCII 契約に揃える (codex Minor 対応)。
+_FILENAME_SAFE_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+)
+
+
 def is_filename_safe(s: str) -> bool:
-    """`[A-Za-z0-9_-]` のみ・非空。agent_id を config ファイル名に使う際の path
+    """`[A-Za-z0-9_-]` (ASCII) のみ・非空。agent_id を config ファイル名に使う際の path
     traversal (`../`・絶対パス) を構造的に防ぐ (Set D name 文字種に整合)。"""
-    return bool(s) and all(c.isalnum() or c in "_-" for c in s)
+    return bool(s) and all(c in _FILENAME_SAFE_CHARS for c in s)
 
 
 # messaging tier (worker/curator 含む全 role) に公開する 4 面。
@@ -988,6 +995,17 @@ class Broker:
         if not is_filename_safe(agent_id):
             return {"ok": False,
                     "error": "[name_invalid] agent_id must match [A-Za-z0-9_-]"}
+        # 既存の有効 agent_id / name と衝突する spawn を拒否する。queue は agent_id 単位の
+        # inbox なので、同名 worker を二重 spawn すると別 pane が同一 inbox を共有し、
+        # 一方の check_messages が他方宛を at-most-once で奪う (codex Major 対応)。
+        with self._lock:
+            dup = any(
+                b.is_active() and (b.agent_id == agent_id or b.name == name)
+                for b in self._binds.values()
+            )
+        if dup:
+            return {"ok": False,
+                    "error": f"[name_in_use] active agent_id/name '{agent_id}' exists"}
         records = self.mcp_list_panes()
         if target is None:
             choice = self.resolve_balanced_split(records)
@@ -1116,6 +1134,16 @@ class Broker:
         if native is None:
             return {"ok": False, "error": "[pane_not_found] unknown pane handle"}
         revoked = self.close_pane(native)  # 既存内部 API (kill + 生存確認 + revoke)
+        # kill 失敗 / pane 残存時は close_pane が [] を返す。pane が実際に消えたかを
+        # 確認し、残存していれば ok=False を返す (呼び手が ok だけで成否を判断できる。
+        # codex Minor 対応)。生存判定不能 (adapter 不通) 時は close の意図を尊重し ok=True。
+        try:
+            still_alive = self.adapter.pane_exists(native) if self.adapter else False
+        except Exception:
+            still_alive = False
+        if still_alive:
+            return {"ok": False, "error": "[io_error] pane still alive after close",
+                    "handle": int(target)}
         # MCP 面は handle で話す。native id は応答に載せない (handle 取り違え回避)。
         # `closed` は revoke した agent_id のリスト (pane id ではない)。
         return {"ok": True, "closed": revoked, "handle": int(target)}
