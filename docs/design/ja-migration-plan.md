@@ -64,7 +64,9 @@
 
 ja 側（CLAUDE.md / skills / dispatcher references）は renga 固有ツールを **MCP の完全修飾名**（`mcp__renga-peers__<tool>`）で直接呼ぶ。配線替え量を最小化するには、broker surface をこれらと同名・同形に寄せるのが基本方針となる。本節は現 broker surface（[`spike/broker.py`](../../spike/broker.py)）と renga-peers の **required 14 ツール**を全数照合した対応表と gap である。
 
-> **required surface の SoT**: ja が要求する renga-peers ツールは [`tools/check_renga_compat.py`](../../tools/check_renga_compat.py) の `REQUIRED_MCP_TOOLS`（renga 0.18.0、**ちょうど 14**）が正本。`spawn_codex_pane` は**この required surface に含まれない**（後述、別枠扱い）。`org_extension_schema.json` の各ロール allowlist もこの 14 と整合する。
+> **required surface の SoT**: ja が要求する renga-peers ツールは [`tools/check_renga_compat.py`](../../tools/check_renga_compat.py) の `REQUIRED_MCP_TOOLS`（renga 0.18.0、**ちょうど 14**）が正本。`spawn_codex_pane` は**この required surface には含まれない**（renga compat checker・各ロール allowlist のいずれにも無い）。
+> **ただし broker の初期 surface には `spawn_codex_pane` を含める**（人間判断 2026-06-10）。required 外であることを承知の上で、**将来 codex を peer pane として spawn する運用に最初から備える**ため、初期スコープに載せる。
+> **初期 surface の正確な内訳（数の整理）**: renga required 14 には `new_tab` / `focus_pane` も含まれるが、これらは人間補助で Set D 非必須のため broker は初期 surface から**除外**する（renga-decoupling.md §4.2 と整合）。したがって broker 初期 surface = **required 14 のうち移植する 12 面**（`new_tab`/`focus_pane` を除く）+ **`spawn_codex_pane`（required 外・人間判断）= 計 13 面**。移植する 12 面は renga と同名・同形に寄せる（drop-in 形差ゼロの対象はこの 12 面 + codex builder であり、除外 2 面は対象外）。
 
 ### 3.1 ツール対応表（全数）
 
@@ -82,10 +84,11 @@ ja 側（CLAUDE.md / skills / dispatcher references）は renga 固有ツール�
 | `set_pane_identity(target, name, role)` | `set_pane_identity` | three-state の **null クリア欠落** | 同一 | ⚠️ null クリア欠落 + addressing（+ role は表示専用に再定義※） |
 | `spawn_claude_pane(direction, target, name, role, model, permission_mode, args, cwd)` | `spawn_agent(agent_id, name, role, argv, cwd, target, direction)` | **大幅相違** | `{ok, handle, direction}` | ❌ rename + 形相違 |
 | `spawn_pane(command, …)`（generic） | **無し** | — | — | ❌ 欠落 |
+| `spawn_codex_pane(args, …)` | **無し**（初期 surface に**新設**） | — | — | ❌ 欠落 → **初期スコープで追加**（required 外・人間判断） |
 | `new_tab(…)` | **無し** | — | — | ❌ 欠落（設計上の意図的除外） |
 | `focus_pane(target)` | **無し** | — | — | ❌ 欠落（設計上の意図的除外） |
 
-上表が required 14 ツール（`tools/check_renga_compat.py` `REQUIRED_MCP_TOOLS` と一致）。**`spawn_codex_pane` は required surface 外**（compat checker・各ロール allowlist のいずれにも無い）。codex を peer pane として spawn する運用は ja の必須面ではないため、broker は初期 surface から**除外**してよい（codex design review は `codex exec` CLI 経路で peer pane を要さない）。これは [§9](#9-確認したい設計判断点窓口人間へ) の確認点 3 を SoT 照合で裏付けた結論である。
+上表の 14 行（`spawn_codex_pane` を除く）が renga の required surface（`tools/check_renga_compat.py` `REQUIRED_MCP_TOOLS` と一致。**`new_tab`/`focus_pane` もこの 14 に含まれる**点に注意）。broker の**初期 surface = この 14 のうち `new_tab`/`focus_pane` を除く 12 面 + `spawn_codex_pane` = 13 面**（人間判断 2026-06-10、[§9](#9-設計判断点人間確認結果) 確認点 3）。`spawn_codex_pane` の追加で将来の codex peer pane spawn に備える。`new_tab`/`focus_pane` は人間補助で Set D 非必須のため初期除外（必要時に追加）。
 
 ※ `send_keys` のキー語彙は照合済みで一致（renga: Enter/Return, Tab, Shift+Tab/BackTab, Esc/Escape, Backspace, Delete/Del, 矢印, Home/End, PageUp/PageDown, Space, Ctrl+A-Z ＝ broker `SEND_KEYS_VOCAB`/`normalize_key` と同一。未知キーは両者 `-32602 invalid-params`）。
 ※ `set_pane_identity` の `role` を broker は **表示専用ラベル**に再定義し、権限 tier は不変 `auth_role` のみで決める（[`spike/broker.py`](../../spike/broker.py) の codex Blocker 対応）。これは renga にない**意図的なセキュリティ強化**であり gap ではなく improvement。
@@ -106,6 +109,7 @@ drop-in 度を上げる＝ja 側の論理・retraining を最小化する、た�
 3. **generic `spawn_pane` の最小公開（secretary のみ）**。`/org-attention-start` の attention watcher は renga の generic `spawn_pane(command=…)` で起動される（renga-decoupling.md §3.1）。broker は既に `inject_mcp_config=False` の非 org spawn 経路（blacklist のみ・token 非注入）を内部に持つため、これを secretary tier に最小公開すれば watcher 経路が壊れない。renga-decoupling.md §4.2 が secretary 専用として予定済み。
 4. **フィールド parity**。`cwd` は **Set D の `list_panes`/`list_peers` 出力に含まれる契約面**であり、「ja が消費していれば追加」より強く扱う ＝ **compat surface（Issue C）の必須項目に格上げ**する（broker は spawn 時に cwd を知るため bind 表に持てる）。省略する場合は Set D amendment として明示が要る。`inspect_pane` の `format=grid` は ja の実呼出が依存している場合のみ追加（YAGNI。Phase C で grep 確定）。`receive_mode`/`kind` は broker では概念が異なる（全 pull 統一）ため、定数化 or 省略を Set D amendment で明記し prose 非破壊にする。
 5. **`set_pane_identity` の null クリア three-state を追加**（renga と同形）。role の表示専用化は維持。
+6. **`spawn_codex_pane` を初期 surface に新設**（人間判断 2026-06-10）。renga と同シグネチャ（`spawn_codex_pane(direction, target?, name?, role?, args?, cwd?)`）で公開し、broker 内部で **codex の対話 TUI argv をビルダーで組む**（spawn_claude_pane と同型のビルダー方式）。**課金中立 guard の codex 版が要る**: claude の `is_interactive_claude_argv`（allowlist / default-deny）が claude TUI に限定するのと同様に、codex 版も **allowlist（default-deny）** とする。codex には非対話サブコマンドが `exec` 以外にも複数ある（`review`＝非対話コードレビュー、`mcp-server` / `app-server` / `exec-server`、`apply` / `sandbox` / `completion` 等）ため、**`codex exec` 単体の blacklist では塞ぎきれない**（これは §7.6 の claude allowlist 化と全く同じ教訓 — blacklist 後追いは「flag 後サブコマンド」「`--` バイパス」を取り逃す）。設計: **`argv[0]` basename == `codex` かつ、以降は対話 TUI 用 allowlist の flag/value のみを許可。`exec` / `review` / `*-server` / `apply` / `sandbox` / `completion` / 未知サブコマンド / bare positional / `--` は一律拒否**（`codex exec` は代表例）。これは §7.6（renga-decoupling.md）の課金中立 argv 保守契約を codex へ拡張する設計判断であり、保守契約（新しい正規の対話 flag は allowlist 拡張要・headless 系は決して入れない）も継承する。broker token を持つ org agent としての codex pane（ナッジ + `check_messages` で受信）も対話 TUI に構造的に限定する。ops tier（dispatcher/secretary）のみが呼べる点は他 spawn 系と同じ。
 
 ### 3.4 重要結論 — 併存設計のため broker は別名（`org-broker`）を採り、FQ 名は書き換わる
 
@@ -280,7 +284,7 @@ prior-art 調査の結論（renga-decoupling.md 参考）どおり、本 backend
 |---|---|---|---|---|
 | **A. terminal 抽出** | `spike/*adapter*` → `claude_org_runtime/terminal/` | adapter Protocol / tmux / wezterm / classify / key 語彙を runtime へ移設。テスト移設。 | — | runtime のテストが green。ja 無改変。 |
 | **B. broker 抽出** | `spike/broker.py` → `claude_org_runtime/broker/` | server/store/tokens/surface に分割。queue 書込を `.state/broker/` 化。choose_split 再利用。daemon CLI entry。**runtime リリース（paired ja sync）**。**この段では ja から未使用（runtime 内部テストのみ）**。`.state/broker/` の **Set C amendment はこの段に前倒し**（書くコードを release する時点で台帳に載せる）。 | A | broker 起動・委譲サイクルが runtime パッケージ上で green。SemVer 加算。ja の依存ツリーに載るが flag 既定 renga で不活性。 |
-| **C. renga 互換 surface** | broker surface を renga と同名・同形に寄せる | `spawn_claude_pane` 構造化ビルダー（[§3.3-1](#33-互換性を上げる設計推奨配線替え量を最小化する寄せ方)）/ target の name・`'focused'` 解決（§3.3-2）/ generic `spawn_pane`（§3.3-3）/ **`cwd` field parity（§3.3-4、必須）**/ `set_pane_identity` null クリア（§3.3-5）。spawn_codex/new_tab/focus は initial surface 除外で確定（§3.1）。 | B | renga golden shape との対応テスト green。drop-in 形差ゼロ。`cwd` 含む Set D 出力面の parity。 |
+| **C. renga 互換 surface** | broker surface を renga と同名・同形に寄せる | `spawn_claude_pane` 構造化ビルダー（[§3.3-1](#33-互換性を上げる設計推奨配線替え量を最小化する寄せ方)）/ target の name・`'focused'` 解決（§3.3-2）/ generic `spawn_pane`（§3.3-3）/ **`cwd` field parity（§3.3-4、必須）**/ `set_pane_identity` null クリア（§3.3-5）/ **`spawn_codex_pane` 新設 + codex 課金中立ビルダー（§3.3-6、default-deny allowlist）**。初期 surface = 移植 12 面 + codex = 13 面（new_tab/focus は除外確定、§3.1）。 | B | 移植 12 面 + codex builder が renga golden shape と drop-in 形差ゼロ。`cwd` 含む Set D 出力面の parity。codex spawn が対話 TUI に構造的限定（`exec`/`review`/`*-server` 等の非対話サブコマンドを default-deny で拒否）。 |
 | **D. ja 統合シーム** | flag + 生成系シーム + pin bump | `ORG_TRANSPORT` env flag（§5.1）/ **runtime に transport surface descriptor を新設**（§5.2 (i)）/ `settings.generator` + ja 側生成器（`gen_delegate_payload.py`・worker_brief）を descriptor 駆動に（§5.2 (i)・§5.3）/ runtime pin bump（§5.4）。**両生成器出力 == descriptor の golden test**。**既定 renga・挙動不変**。 | B, C | flag=renga で現行と bit 等価。flag=broker で全生成物が broker 面を指す。golden test green。 |
 | **E. ja prose + 契約改訂** | 分類 (a) prose + 契約 | 受信モデル/spawn 儀式/エラー分岐の prose（§5.2 (ii)）。契約改訂: Set D Surface 1/2/3/4/5 + Surface 8（broker auth&delivery）+ non-goals §12（host-local 例外）。**Set C の `.state/broker/` 改訂は B に前倒し済**（E では `cwd`/`receive_mode`/`kind` の Set D 出力面 amendment と、永続 transport config を採る場合のみ Set C 追加を扱う）。 | D | 契約改訂 PR 批准。両系併記 prose がレビュー通過。 |
 | **F. event accelerator（任意・低優先）** | tmux hooks 低遅延補助 | 差分 reconcile を正準に据えたまま、同 event ring に tmux hooks を流す spike（[§6.3](#63-推奨--cただし-accelerator-は-defer)）。**3 分 cadence の遅延が実運用で不足と判明した時のみ着手**。 | B（独立） | hooks 経路の遅延改善を実測。reconcile 故障時 degrade を確認。 |
@@ -290,18 +294,20 @@ prior-art 調査の結論（renga-decoupling.md 参考）どおり、本 backend
 
 ---
 
-## 9. 確認したい設計判断点（窓口/人間へ）
+## 9. 設計判断点（人間確認結果）
 
-本書の方針は固めたが、以下は自己判断せず確認したい（CLAUDE.md「設計判断に迷う点は窓口へ」）:
+下記 5 点は**人間判断で確定済み（2026-06-10、窓口経由）**。4 点は本書の推奨どおり、確認点 3 のみ変更:
 
-1. **成果物形態**: 本書（新規 `ja-migration-plan.md`）+ `renga-decoupling.md` に短い次段ポインタ追記、で良いか（renga-decoupling.md は完動ゲートで最終化済のため、追記は最小ポインタに留める想定）。
-2. **MCP サーバー名**: 併存制約により broker は `org-broker`（renga と別名）で確定 ＝ FQ ツール名は必ず変わる（[§3.4](#34-重要結論--併存制約により-fq-ツール名は必ず変わる)）。この帰結（drop-in は形レベル・FQ 名は機械置換）で合意して良いか。
-3. **spawn_codex_pane / new_tab / focus_pane のスコープ**: 初期 broker surface から除外で良いか（codex design review で **SoT 照合により裏付け済**: `tools/check_renga_compat.py` の required 14 ・各ロール allowlist のいずれにも `spawn_codex_pane` は無く、new_tab/focus は人間補助で Set D 非必須。[§3.1](#31-ツール対応表全数)）。残る確認は「ja に codex を peer pane として spawn する運用が将来要るか」のみ。
-4. **(d) の推奨**: 差分 reconcile を正準維持 + tmux hooks accelerator は defer（[§6.3](#63-推奨--cただし-accelerator-は-defer)）で良いか。
-5. **flag の粒度**: messaging all-or-nothing + pane 操作後追いの 2 段（§5.5）で良いか。面単位のさらに細かい中間状態は許さない方針で良いか。
+1. **成果物形態** → **確定（推奨どおり）**: 本書（新規 `ja-migration-plan.md`）+ `renga-decoupling.md` に最小の次段ポインタ追記（§10）。
+2. **MCP サーバー名** → **確定（推奨どおり）**: broker は `org-broker`（renga と別名）。FQ ツール名は `mcp__org-broker__*` に書き換わる前提（[§3.4](#34-重要結論--併存設計のため-broker-は別名org-brokerを採りfq-名は書き換わる)。drop-in は形レベル・FQ 名は機械置換）。
+3. **spawn_codex_pane / new_tab / focus_pane のスコープ** → **変更して確定**: `spawn_codex_pane` は required 外だが**初期 broker surface に含める**（将来の codex peer pane spawn に最初から備える）。codex 課金中立ビルダーを伴う（default-deny allowlist。`exec`/`review`/`*-server` 等の非対話サブコマンドを拒否、[§3.3-6](#33-互換性を上げる設計推奨配線替え量を最小化する寄せ方)）。`new_tab`/`focus_pane` は初期除外で確定。
+4. **(d) の推奨** → **確定（推奨どおり）**: 差分 reconcile を backend 横断正準で維持 + tmux hooks accelerator は defer（control mode 主軸は不採用、[§6.3](#63-推奨--cただし-accelerator-は-defer)）。
+5. **flag の粒度** → **確定（推奨どおり）**: messaging all-or-nothing 先行 + pane 操作後追いの 2 段（§5.5）。面単位のさらに細かい中間状態は許さない。
 
 ---
 
 ## 改訂履歴
 
 - 2026-06-10: 初版（design only。ja-migration-extraction-design 委譲タスクの成果物。(a) renga 互換性調査+gap / (b) runtime 抽出 / (c) ja 統合シーム / (d) control mode vs 差分 reconcile 判断 / (e) Issue 分解を収録）。codex design review 1 周（gpt-5.5、Blocker 0 / Major 6 / Minor 2 / Nit 1。総評「重大な設計破綻なし、§6 推奨は妥当」）を反映: tool 数 15→**14**（`spawn_codex_pane` を required 外に。SoT=`tools/check_renga_compat.py`）/ `cwd` を field parity 必須に格上げ / transport flag を初期 env 限定（Set C 改訂回避）/ **transport surface descriptor** 新設で複数生成器の単一 SoT 化 / 切戻し完了条件を 5 項目に具体化 / Set C `.state/broker/` 改訂を Issue B に前倒し / §3.4・§7 の断定を緩和。
+- 2026-06-10: 5 設計判断点の人間回答を反映（窓口経由）。4 点は推奨どおり確定（成果物形態 / broker 名=`org-broker` 別名 / 差分 reconcile 正準・control mode 不採用 / flag 粒度 2 段）。**確認点 3 のみ変更**: `spawn_codex_pane` を required 外と承知の上で**初期 broker surface に含める**（将来の codex peer pane spawn に備える）。§3 intro・§3.1 表・§3.3-6（codex 課金中立ビルダー）・§8 Issue C・§9 を更新。
+- 2026-06-10: 確認点 3 反映分に codex design review 1 周（gpt-5.5、Blocker 0 / Major 2 / Minor 0 / Nit 1）を追加適用。(M1) 初期 surface の数を厳密化 — required 14 には `new_tab`/`focus_pane` も含まれるため、broker 初期 surface = **移植 12 面 + `spawn_codex_pane` = 13 面**と全節整合（§3 intro・§3.1・§8）。(M2) codex 課金中立 guard を `codex exec` 単体 blacklist ではなく **default-deny allowlist**（`exec`/`review`/`*-server`/`apply`/`sandbox`/`completion`/未知サブコマンド/`--`/bare positional を拒否）に修正（§3.3-6・§8）。(Nit) §9 見出しを「設計判断点（人間確認結果）」へ。総評「design only/ja 不可触の逸脱なし」。
