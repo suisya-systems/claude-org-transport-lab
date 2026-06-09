@@ -112,6 +112,15 @@ class PollEventsUnitTest(unittest.TestCase):
         exited = [e for e in ev3["events"] if e["type"] == "pane_exited"]
         self.assertEqual(len(exited), 1, "pane_exited は emit 1 回 (反復 reconcile で重複しない)")
 
+    def test_close_response_has_no_native_pane_id(self) -> None:
+        # close_pane の MCP 応答も handle のみ (native pane_id 非露出)
+        sp = self.c.broker.spawn_agent("worker-z", "worker-z", "worker", ["claude"])
+        self.c.broker.register_local(sp["token"])
+        resp = self.c.broker.close_pane_target(sp["handle"])
+        self.assertTrue(resp.get("ok"))
+        self.assertNotIn("pane_id", resp)
+        self.assertEqual(resp.get("handle"), sp["handle"])
+
     def test_event_payload_has_no_native_pane_id(self) -> None:
         # MCP 面は handle (`id`) のみ。native pane_id は payload に露出しない
         cur = self.c.broker.poll_events(since=None, timeout_ms=0)["next_since"]
@@ -218,6 +227,13 @@ class SpawnInjectionTest(unittest.TestCase):
         # config の Authorization に発行 token が埋まっている (worker の接続経路)
         auth = body["mcpServers"]["org-broker"]["headers"]["Authorization"]
         self.assertIn(sp["token"], auth)
+
+    def test_agent_id_path_traversal_rejected(self) -> None:
+        # agent_id に path traversal を仕込むと token 発行・config 書込み前に弾く
+        for bad in ("../../evil", "/abs/evil", "a/b", "name.with.dot", ""):
+            sp = self.c.broker.spawn_agent(bad, bad, "worker", ["claude"])
+            self.assertFalse(sp.get("ok"), bad)
+            self.assertIn("[name_invalid]", sp.get("error", ""), bad)
 
     def test_split_exception_revokes_token_and_sanitizes(self) -> None:
         # split が例外 → 発行済み token は revoke され、応答に例外文字列を漏らさない

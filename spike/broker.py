@@ -61,6 +61,12 @@ def role_tier(role: str) -> int:
     return ROLE_TIER.get(role, TIER_MESSAGING)
 
 
+def is_filename_safe(s: str) -> bool:
+    """`[A-Za-z0-9_-]` のみ・非空。agent_id を config ファイル名に使う際の path
+    traversal (`../`・絶対パス) を構造的に防ぐ (Set D name 文字種に整合)。"""
+    return bool(s) and all(c.isalnum() or c in "_-" for c in s)
+
+
 # messaging tier (worker/curator 含む全 role) に公開する 4 面。
 _MESSAGING_TOOLS = [
     {
@@ -977,6 +983,11 @@ class Broker:
         if role not in SPAWNABLE_ROLES:
             return {"ok": False,
                     "error": f"[invalid-params] role must be one of {SPAWNABLE_ROLES}"}
+        # agent_id は per-agent config のファイル名に使う。filename-safe を強制して
+        # `../` / 絶対パスで state_dir 外へ token 入り config を書く経路を断つ (codex Major)。
+        if not is_filename_safe(agent_id):
+            return {"ok": False,
+                    "error": "[name_invalid] agent_id must match [A-Za-z0-9_-]"}
         records = self.mcp_list_panes()
         if target is None:
             choice = self.resolve_balanced_split(records)
@@ -1105,7 +1116,9 @@ class Broker:
         if native is None:
             return {"ok": False, "error": "[pane_not_found] unknown pane handle"}
         revoked = self.close_pane(native)  # 既存内部 API (kill + 生存確認 + revoke)
-        return {"ok": True, "closed": revoked, "pane_id": native}
+        # MCP 面は handle で話す。native id は応答に載せない (handle 取り違え回避)。
+        # `closed` は revoke した agent_id のリスト (pane id ではない)。
+        return {"ok": True, "closed": revoked, "handle": int(target)}
 
     # ------------------------------------------------------------- MCP tools
     def call_tool(self, bind: AgentBind, name: str, args: dict) -> dict:
