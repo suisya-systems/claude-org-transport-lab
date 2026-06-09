@@ -138,7 +138,10 @@ class Broker:
         self._lock = threading.Lock()
         self._binds: dict[str, AgentBind] = {}        # token -> bind
         self._queues: dict[str, list[dict]] = {}      # agent_id -> messages
-        self._nudge_threads: dict[str, threading.Thread] = {}
+        # key=agent_id -> (配達スレッド, そのスレッドが宛先とする token)。
+        # token を併せ持つことで「生存しているが宛先 token が失効済みの dying worker」を
+        # dedup から除外できる (codex round 4 Major 対応)。
+        self._nudge_threads: dict[str, tuple[threading.Thread, str]] = {}
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -220,11 +223,10 @@ class Broker:
                 self._queues.setdefault(agent_id, [])
             else:
                 self._queues[agent_id] = []
-                # 旧ライフサイクルの nudge thread エントリも破棄する: _trigger_nudge は
-                # _nudge_threads[agent_id] の is_alive() だけで二重起動を抑止するため、
-                # 旧 thread が終了直前 (旧 target inactive で return 途中) に残っていると、
-                # 新ライフサイクルの enqueue で nudge thread が起動されず未読が放置される
-                # (codex round 3 Major 対応)。新規ライフサイクルでは dedup キーを捨てる。
+                # 旧ライフサイクルの nudge thread dedup エントリも eager に破棄する。
+                # _trigger_nudge は token 失効を見て dying worker を信用しないため
+                # (codex round 4 Major 対応) 本 pop が無くても新規 nudge は起動するが、
+                # 失効エントリを即時掃除して dedup 表の肥大化を防ぐ (codex round 3 由来)。
                 self._nudge_threads.pop(agent_id, None)
         self._journal(
             "token_issued", agent_id=agent_id, role=role, pane_id=pane_id,
@@ -474,13 +476,21 @@ class Broker:
         # 二重注入) を防ぐ (codex review round 3 Major 対応)
         with self._lock:
             existing = self._nudge_threads.get(key)
-            if existing and existing.is_alive():
-                return  # 配達スレッドが既に走っている (冪等性)
+            if existing is not None:
+                ex_thread, ex_token = existing
+                ex_bind = self._binds.get(ex_token)
+                if ex_thread.is_alive() and ex_bind is not None and ex_bind.is_active():
+                    return  # 有効 token の配達スレッドが稼働中 (冪等性)
+                # 生存していても token が失効済み = 旧ライフサイクルの dying worker
+                # (新しい未読を配達しない)。信用せず新 worker を起動する。dedup を
+                # agent_id 単位の is_alive() だけにすると、同一 agent_id に別の有効
+                # token が残るケースで新 worker が抑止される (codex round 4 Major
+                # 対応)。worker が宛先とする token の有効性まで含めて dedup する。
             t = threading.Thread(
                 target=self._nudge_worker, args=(target,),
                 name=f"nudge-{key}", daemon=True,
             )
-            self._nudge_threads[key] = t
+            self._nudge_threads[key] = (t, target.token)
         t.start()
 
     def _nudge_worker(self, target: AgentBind) -> None:

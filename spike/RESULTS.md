@@ -228,12 +228,19 @@ Phase 1（WezTerm / Windows）と Phase 2（tmux / POSIX）の AC 判定を記�
 - **TTL 既定値は None（失効なし）**: 設計書 §4.4 は「セッション寿命より長い TTL + 退役時 revoke」を基本とし
   TTL を保険と位置付ける。既定は長寿命（None）で、退役 revoke を一次担保とする。実運用 TTL 値の確定は
   本体取り込み時に行う。
-- **codex セルフレビュー（round 1）**: Blocker 0 / Major 2 / Minor 2 / Nit 1。全件修正コミット済み:
-  - Major: `call_tool` 冒頭で `auth_error()` 再検証（stale bind 直呼びの素通り遮断）/ `revoke_token` で
-    当該 agent の未読キューを破棄 + `_nudge_worker` に `is_active()` ガード（revoke 後の stale target への
-    nudge・再発行 token への未読漏洩を遮断）。
-  - Minor: idle 宛 nudge 検証を `nudge_sent` + `NUDGE_TEXT` 打鍵まで強化 / `close_pane` は kill 失敗時に
-    誤 revoke しない（reap と方針統一）。
-  - Nit: `broker.py` 冒頭の「TTL/失効・再発行は実装しない」記述を Phase 3 実装済みに更新。
-  - 併せて検証ハーネスの journal 同期 race（`send_line` 記録が journal 追記より先行）を `_wait_event` で解消。
-  - round 2 追レビュー結果は PR 本文 / 完了報告に記載。
+- **codex セルフレビュー（full 検証深度、計 4 ラウンド・収束）**: 各ラウンドが並行性エッジを 1〜2 件ずつ
+  収束方向に拾い、全件修正コミット済み。最終 round 4 は Blocker 0 / 残 Major 0（全エッジ解消）。
+  - **round 1**（Major 2 / Minor 2 / Nit 1）: `call_tool` 冒頭で `auth_error()` 再検証（stale bind 直呼びの
+    素通り遮断）/ `revoke_token` で当該 agent の未読キュー破棄 + `_nudge_worker` に `is_active()` ガード /
+    idle nudge 検証を `nudge_sent`+`NUDGE_TEXT` まで強化 / `close_pane` は kill 失敗時に誤 revoke しない /
+    `broker.py` 冒頭の旧記述更新。併せてハーネスの journal 同期 race を `_wait_event` で解消。
+  - **round 2**（Major 2 / Minor 1 / Nit 1）: `_nudge_worker` の TOCTOU を send_line 直前のロック下
+    active+pending 再確認で縮小 / TTL 失効時のキュー継承を `issue_token` の新規ライフサイクル検出で遮断 /
+    `close_pane` を kill 後 `pane_exists` 生存確認に強化 + 回帰テスト追加。
+  - **round 3**（Major 1）: nudge thread 再利用 race（dedup が `agent_id` 単位 `is_alive()` のみ）を
+    新規ライフサイクル時の dedup エントリ破棄で遮断 + 決定的回帰テスト（pre-fix で空配達を再現確認）。
+  - **round 4 / 最終**（Major 1 / Minor 1）: nudge dedup を token 有効性込みに強化し「生存するが宛先 token が
+    失効済みの dying worker」を信用しない（同一 agent_id に別有効 token が残るケースを遮断）/ ハーネス
+    `wait_nudge` を「過去に nudge があるか」から baseline 件数増加待ちに強化（同一 pane 2 通目以降の
+    再発火退行を検出）+ 両者の決定的回帰テスト（pre-fix で空配達を再現確認）。
+  - 窓口判断によりレビューは round 4 を最終ラウンドとして打ち止め（フォーク spike・完了基準は全 green 達成済み）。

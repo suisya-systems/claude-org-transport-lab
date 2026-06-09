@@ -190,12 +190,20 @@ class Cycle:
         """from_agent の token bind で送信 (from 帰属は broker が token から付与)。"""
         return self.broker.enqueue(self.bind(from_agent), to_agent, message)
 
-    def wait_nudge(self, agent_id: str, timeout: float = 5.0) -> bool:
-        """ナッジ配達 (send_line 打鍵) が宛先ペインに届くまで待つ。"""
+    def nudge_count(self, agent_id: str) -> int:
+        return len(self.adapter.nudges_for(self.panes[agent_id]))
+
+    def wait_nudge(self, agent_id: str, baseline: int = 0, timeout: float = 5.0) -> bool:
+        """新規ナッジ配達 (send_line 打鍵) が宛先ペインに届くまで待つ。
+
+        「過去に 1 件でも nudge があるか」ではなく baseline からの件数増加を待つ:
+        同一 pane への 2 通目以降で nudge 再発火しない退行を検出するため (codex
+        round 4 Minor 対応)。呼出側は送信前の nudge_count を baseline に渡す。
+        """
         pane = self.panes[agent_id]
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if self.adapter.nudges_for(pane):
+            if len(self.adapter.nudges_for(pane)) > baseline:
                 return True
             time.sleep(0.01)
         return False
@@ -215,12 +223,13 @@ def check_cycle(c: Cycle) -> tuple[bool, str]:
     """AC-3-cycle: 6 経路全数往復 + token 由来 from 帰属。"""
     failures = []
     for label, frm, to, msg in DELEGATION_PATHS:
+        base = c.nudge_count(to)  # 送信前の nudge 件数 (増加分を待つ)
         res = c.send(frm, to, msg)
         if not res.get("ok"):
             failures.append(f"{label}: enqueue 失敗 {res}")
             continue
-        if not c.wait_nudge(to):
-            failures.append(f"{label}: ナッジ未配達 ({to})")
+        if not c.wait_nudge(to, baseline=base):
+            failures.append(f"{label}: ナッジ未配達/再発火せず ({to})")
         got = c.drain(to)
         if len(got) != 1:
             failures.append(f"{label}: 配達数 {len(got)} != 1")

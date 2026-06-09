@@ -208,7 +208,7 @@ class AttributionTest(unittest.TestCase):
         broker.register_local(b1)
         stale = threading.Thread(target=lambda: time.sleep(0.5), daemon=True)
         stale.start()
-        broker._nudge_threads["b"] = stale          # 旧ライフサイクルの生存 thread を模す
+        broker._nudge_threads["b"] = (stale, b1)     # 旧ライフサイクルの生存 thread を模す
         broker.revoke_token(b1, reason="suspend")
         b2 = broker.issue_token("b", "b", "worker", pane_id="%b")  # 再発行
         broker.register_local(b2)
@@ -218,6 +218,38 @@ class AttributionTest(unittest.TestCase):
         while time.monotonic() < deadline and not adapter.nudges_for("%b"):
             time.sleep(0.01)
         self.assertEqual(adapter.nudges_for("%b"), [run_ac3.NUDGE_TEXT])
+        stale.join(timeout=1.0)
+
+    def test_dedup_ignores_dying_worker_of_revoked_token(self) -> None:
+        # 同一 agent_id に別の有効 token が残るケース: 旧 token 向け worker が生存中でも
+        # その token が失効していれば dedup を信用せず新 worker を起動する
+        # (codex round 4 Major)。
+        import threading
+        broker = Broker(
+            state_dir=_SPIKE / "broker-state" / "ut" / "dyingworker",
+            adapter=FakeAdapter(), nudge_defer_interval=0.01,
+        )
+        adapter: FakeAdapter = broker.adapter  # type: ignore[assignment]
+        adapter.add_pane("%b1", state="idle")
+        adapter.add_pane("%b2", state="idle")
+        snd = broker.issue_token("snd", "snd", "worker")
+        broker.register_local(snd)
+        b1 = broker.issue_token("b", "b", "worker", pane_id="%b1")
+        broker.register_local(b1)
+        b2 = broker.issue_token("b", "b", "worker", pane_id="%b2")  # had_active=True
+        broker.register_local(b2)
+        # 旧 token b1 向けの生存 worker を模す + b1 を revoke (dying worker 化)
+        stale = threading.Thread(target=lambda: time.sleep(0.5), daemon=True)
+        stale.start()
+        broker._nudge_threads["b"] = (stale, b1)
+        broker.revoke_token(b1, reason="rotate")
+        # enqueue は有効な b2 (pane %b2) へ配送される
+        res = broker.enqueue(broker.get_bind(snd), "b", "新 token 宛")
+        self.assertTrue(res.get("ok"), res)
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and not adapter.nudges_for("%b2"):
+            time.sleep(0.01)
+        self.assertEqual(adapter.nudges_for("%b2"), [run_ac3.NUDGE_TEXT])
         stale.join(timeout=1.0)
 
     def test_reissue_does_not_inherit_stale_queue(self) -> None:
@@ -244,9 +276,10 @@ class DelegationCycleTest(unittest.TestCase):
         c.setup()
         try:
             for label, frm, to, msg in run_ac3.DELEGATION_PATHS:
+                base = c.nudge_count(to)  # 送信前件数 (再発火の増加分を待つ)
                 res = c.send(frm, to, msg)
                 self.assertTrue(res.get("ok"), f"{label}: {res}")
-                self.assertTrue(c.wait_nudge(to), f"{label}: nudge 未配達")
+                self.assertTrue(c.wait_nudge(to, baseline=base), f"{label}: nudge 未配達/再発火せず")
                 got = c.drain(to)
                 self.assertEqual(len(got), 1, f"{label}: 配達数")
                 self.assertEqual(got[0]["from_id"], frm, f"{label}: from 帰属")
