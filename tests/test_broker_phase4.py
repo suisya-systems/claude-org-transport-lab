@@ -247,6 +247,30 @@ class SpawnInjectionTest(unittest.TestCase):
         sp3 = self.c.broker.spawn_agent("worker-e", "worker-e", "worker", ["claude"])
         self.assertTrue(sp3.get("ok"), sp3)
 
+    def test_concurrent_issue_token_single_winner(self) -> None:
+        # 並行発行で重複拒否が check-then-act race を起こさないこと (codex round 4 Major)。
+        # 実際の race 点 issue_token(reject_if_active=True) を多スレッドで叩く。
+        import threading
+        results: list = []
+        barrier = threading.Barrier(12)
+
+        def _attempt():
+            barrier.wait()  # 全スレッドを同時発射して race を最大化する
+            results.append(
+                self.c.broker.issue_token("dup", "dup", "worker", reject_if_active=True)
+            )
+
+        threads = [threading.Thread(target=_attempt) for _ in range(12)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        winners = [r for r in results if r is not None]
+        self.assertEqual(len(winners), 1, f"発行は 1 回のみのはず: {len(winners)}")
+        active = [b for b in self.c.broker._binds.values()
+                  if b.agent_id == "dup" and b.is_active()]
+        self.assertEqual(len(active), 1, "有効 bind は 1 本のみ")
+
     def test_filename_safe_rejects_unicode(self) -> None:
         from broker import is_filename_safe
         self.assertTrue(is_filename_safe("worker-phase4_1"))

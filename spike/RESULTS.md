@@ -322,8 +322,23 @@ Phase 1（WezTerm / Windows）と Phase 2（tmux / POSIX）の AC 判定を記�
     ごとに 1 回」であり（`_diff_emit_locked` が単一 lock + `_reconcile_lock` 直列化で担保。回帰テストで反復
     reconcile でも pane_exited が 1 回を確認）、「1 reader へ 1 回 deliver」ではない。`poll_events` は renga と
     同型の **replayable な cursor 読み出し**（caller が next_since で前進）であり、cursor モデルとして正しい。
-  - 回帰テスト追加（`tests/test_broker_phase4.py` 計 20 ケース）: 権限昇格不可 / crash→token revoke /
+  - 回帰テスト追加（`tests/test_broker_phase4.py`）: 権限昇格不可 / crash→token revoke /
     config 注入 + split 例外時 revoke + 例外サニタイズ / payload に native id 非露出 / emit 1 回。
+- **self-review round 2**（Major 2）: `close_pane` の MCP 応答が native `pane_id` を返していた → handle のみに /
+  `spawn_agent` の `agent_id` が config ファイル名に無検証（path traversal で state_dir 外へ token 入り config）
+  → `is_filename_safe([A-Za-z0-9_-])` で発行・書込み前に `[name_invalid]`。
+- **self-review round 3**（Major 1 / Minor 2）: `spawn_agent` が同一 active `agent_id`/`name` の二重 spawn を許し
+  inbox（agent_id 単位 queue）共有で message 横取り → `[name_in_use]` 拒否 / `close_pane` が pane 残存でも
+  ok:true → pane_exists 確認で残存時 ok:false / `is_filename_safe` の `str.isalnum()` が Unicode 英数字を通す
+  → ASCII 明示集合。
+- **self-review round 4 / 最終**（Major 1）: 二重 spawn 拒否が check-then-act で並行 spawn race が残存 →
+  **重複判定 + 予約を `issue_token(reject_if_active=True)` の単一ロック下に閉じ**、ThreadingHTTPServer 配下の
+  並行二重発行を構造的に断つ（並行 12 スレッド発射で発行 1 回・有効 bind 1 本の決定的回帰テスト追加）。
+  窓口判断により round 4 を絶対最終ラウンドとして打ち止め。残 Minor 1 件（`close_pane` は adapter 不通時に
+  close 意図を尊重して ok:true ＝ 既存 `close_pane` 内部 API の「生存判定不能を退役扱いしない」方針と統一）は
+  設計上の許容として残置（PR 既知制限に明記）。
+- 収束: round1(Blocker2/Major5) → round2(0/2) → round3(0/1) → round4(0/1、修正済) → **Blocker/Major 残 0**。
+  回帰テスト計 25 ケース green。
 
 ### 既知制限（Phase 4）
 
@@ -339,3 +354,7 @@ Phase 1（WezTerm / Windows）と Phase 2（tmux / POSIX）の AC 判定を記�
   では行わない。本 Phase の成果物は broker 側の能力実証に閉じる。
 - **balanced split の runtime 依存**: `choose_split` は `claude_org_runtime`（pyproject 既存依存）を lazy
   import する。未導入環境では `spawn_agent` の balanced split が失敗する（messaging 面は影響なし）。
+- **`close_pane` の adapter 不通時の成否（codex round 4 残 Minor、設計上許容）**: kill 後に `pane_exists` が
+  例外（adapter 不通）になるケースは、生存判定不能のため close 意図を尊重して ok:true を返す。これは既存
+  `close_pane` 内部 API の「生存判定不能を退役扱いしない」方針と統一した挙動であり、adapter 健全時は pane 残存を
+  ok:false で正しく弾く。adapter 不通という別事象は `poll_events` の reconcile が回復経路を持つ。

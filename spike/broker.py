@@ -363,18 +363,30 @@ class Broker:
         role: str,
         pane_id: PaneId | None = None,
         ttl: float | None = None,
-    ) -> str:
+        reject_if_active: bool = False,
+    ) -> str | None:
         """spawn 時の per-agent token 発行 (設計書 §4.4)。
 
         ttl を与えると発行時刻 + ttl 秒で失効する (None=失効なし)。設計書 §4.4 は
         「セッション寿命より長い TTL + 退役時 revoke」を基本とし、TTL は失効漏れの
         保険と位置付ける。suspend/resume をまたいだ token 再利用は不可 (resume は
         本メソッドの再呼出で別 token を再発行する。旧 token は revoke 済みのまま)。
+
+        reject_if_active=True のとき、同一 agent_id / name の有効 bind が既に在れば
+        **同一ロック下で** None を返す (発行しない)。check-then-act を避け、
+        ThreadingHTTPServer 配下の並行 spawn での二重発行 race を構造的に断つ
+        (queue は agent_id 単位の inbox なので二重 spawn は message 横取りを生む。
+        codex round 4 Major 対応)。spawn_agent からのみ True で呼ぶ。
         """
         ttl = self.default_token_ttl if ttl is None else ttl
         now = time.time()
         token = secrets.token_urlsafe(32)
         with self._lock:
+            if reject_if_active and any(
+                b.is_active(now) and (b.agent_id == agent_id or b.name == name)
+                for b in self._binds.values()
+            ):
+                return None  # caller は [name_in_use] にマップする (発行も journal もしない)
             # 既存の有効 bind が他に無い agent_id への発行 = 新規ライフサイクルの
             # 開始 (初回 spawn / 退役・TTL 失効後の resume 再発行)。この場合は旧
             # ライフサイクルの未読キューを破棄して継承を断つ。TTL 失効は revoke_token
@@ -995,17 +1007,6 @@ class Broker:
         if not is_filename_safe(agent_id):
             return {"ok": False,
                     "error": "[name_invalid] agent_id must match [A-Za-z0-9_-]"}
-        # 既存の有効 agent_id / name と衝突する spawn を拒否する。queue は agent_id 単位の
-        # inbox なので、同名 worker を二重 spawn すると別 pane が同一 inbox を共有し、
-        # 一方の check_messages が他方宛を at-most-once で奪う (codex Major 対応)。
-        with self._lock:
-            dup = any(
-                b.is_active() and (b.agent_id == agent_id or b.name == name)
-                for b in self._binds.values()
-            )
-        if dup:
-            return {"ok": False,
-                    "error": f"[name_in_use] active agent_id/name '{agent_id}' exists"}
         records = self.mcp_list_panes()
         if target is None:
             choice = self.resolve_balanced_split(records)
@@ -1020,7 +1021,13 @@ class Broker:
         if target_native is None:
             return {"ok": False, "error": "[pane_not_found] split target unresolved"}
         # token を先に発行し (§4.4 発行=spawn 要求時点)、起動 argv に config を注入する。
-        tok = self.issue_token(agent_id, name, role, pane_id=None, ttl=ttl)
+        # reject_if_active=True で「重複判定 + 予約」を単一ロック下に閉じ、並行 spawn の
+        # 二重発行 race を断つ (codex round 4 Major 対応)。queue は agent_id 単位 inbox。
+        tok = self.issue_token(agent_id, name, role, pane_id=None, ttl=ttl,
+                               reject_if_active=True)
+        if tok is None:
+            return {"ok": False,
+                    "error": f"[name_in_use] active agent_id/name '{agent_id}' exists"}
         launch_argv = list(argv)
         if inject_mcp_config:
             cfg_path = self._write_agent_mcp_config(agent_id, tok)
