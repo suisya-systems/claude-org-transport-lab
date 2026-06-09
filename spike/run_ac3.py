@@ -258,10 +258,9 @@ def check_nudge_defer(c: Cycle) -> tuple[bool, str]:
 
         n0 = len(_journal(c))
         c.broker.enqueue(c.bind("secretary"), agent, f"{state} 中の宛先へ割り込み")
-        # 配達 (send_line) を待つ
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline and not c.adapter.nudges_for(pane):
-            time.sleep(0.01)
+        # nudge_sent の journal 書込みまで待つ (send_line 記録は journal 追記より
+        # 先に起きるため、adapter の nudge だけ待つと nudge_sent を取りこぼす race)。
+        _wait_event(c, n0, "nudge_sent")
         ev = [e for e in _journal(c)[n0:] if e["event"].startswith("nudge")]
         deferred = [e for e in ev if e["event"] == "nudge_deferred"]
         sent = [e for e in ev if e["event"] == "nudge_sent"]
@@ -279,21 +278,27 @@ def check_nudge_defer(c: Cycle) -> tuple[bool, str]:
             states = {e["state"] for e in deferred}
             notes.append(f"{state}: defer {len(deferred)} 回 (states={states}) → 静止後配達")
 
-    # idle 宛は即時 (defer 0 回) であることも確認
+    # idle 宛は即時 (defer 0 回) かつ実際にナッジが配達されることを確認
+    # (defer が無いことだけでなく nudge_sent + NUDGE_TEXT 打鍵まで検証する。
+    #  「idle 宛で nudge が全く送られない」退行も検出する。codex Minor 対応)
     pane_idle = "%defer-idle"
     c.adapter.add_pane(pane_idle, state="idle")
     c.broker.register_local(c.broker.issue_token("defer-idle", "defer-idle", "worker", pane_id=pane_idle))
     n0 = len(_journal(c))
-    c.broker.enqueue(c.bind("secretary"), "defer-idle", "idle 宛")
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline and not c.adapter.nudges_for(pane_idle):
-        time.sleep(0.01)
+    res = c.broker.enqueue(c.bind("secretary"), "defer-idle", "idle 宛")
+    _wait_event(c, n0, "nudge_sent")
     idle_ev = [e for e in _journal(c)[n0:] if e["event"].startswith("nudge")]
     idle_deferred = [e for e in idle_ev if e["event"] == "nudge_deferred"]
-    if idle_deferred:
+    idle_sent = [e for e in idle_ev if e["event"] == "nudge_sent"]
+    idle_nud = c.adapter.nudges_for(pane_idle)
+    if not res.get("ok"):
+        failures.append(f"idle 宛 enqueue 失敗 {res}")
+    elif idle_deferred:
         failures.append(f"idle 宛で defer 発生 {len(idle_deferred)} 回 (即時配達のはず)")
+    elif len(idle_sent) != 1 or idle_nud != [NUDGE_TEXT]:
+        failures.append(f"idle 宛で即時配達されない (sent={len(idle_sent)} nudges={idle_nud})")
     else:
-        notes.append("idle 宛: defer 0 回で即時配達")
+        notes.append("idle 宛: defer 0 回で即時配達 (nudge_sent 1 回・NUDGE_TEXT 打鍵)")
 
     go = not failures
     return go, ("; ".join(notes) if go else "; ".join(failures))
@@ -406,6 +411,16 @@ def _journal(c: Cycle) -> list[dict]:
     if not path.exists():
         return []
     return [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+
+
+def _wait_event(c: Cycle, n0: int, event: str, timeout: float = 5.0) -> bool:
+    """journal の n0 以降に指定 event が現れるまで待つ (ナッジスレッドとの同期)。"""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if any(e["event"] == event for e in _journal(c)[n0:]):
+            return True
+        time.sleep(0.01)
+    return False
 
 
 # ---------------------------------------------------------------------------

@@ -4,8 +4,10 @@
 設計 SoT: docs/design/renga-decoupling.md §4 (broker/adapter 設計)・§7.1 (AC)。
 
 スパイクとしての簡略化 (既知。Phase 3 本実装スコープとの境界):
-- 認証は「長寿命 token + static headers」固定 (確定事項 (2))。
-  TTL / headersHelper / 失効・再発行は実装しない。
+- 認証は static headers で token を渡す (確定事項 (2))。token ライフサイクル
+  (TTL / pane_exited revoke / close revoke / suspend-resume 再発行) は Phase 3 で
+  本実装した (§4.4。下記 issue_token / authorize / revoke_* / suspend を参照)。
+  headersHelper による動的更新は導入していない (static headers のまま)。
 - queue store は spike/broker-state/ 配下 (自己完結)。本体の .state/ には
   一切触れない (本体設計上の置き場 .state/broker/ は Phase 3 で扱う)。
 - localhost (127.0.0.1) bind のみ。外部公開しない (non-goals §12 整合)。
@@ -232,6 +234,11 @@ class Broker:
 
         失効と同時に session / 登録も落とし、list_peers・配送先・以後の MCP 呼出
         から構造的に排除する。子プロセスに env が漏れていても以後使えない (§4.4)。
+
+        併せて当該 agent の未読キューも破棄する: queue は agent_id 単位で drain される
+        ため、suspend/退役後に同一 agent_id で token を再発行すると旧ライフサイクルの
+        未読が新 token に漏れる (codex Major 対応)。退役済み宛の未読は配達不能であり、
+        破棄が正しい。pending nudge も drain 対象が空になることで自然停止する。
         """
         with self._lock:
             bind = self._binds.get(token)
@@ -242,6 +249,13 @@ class Broker:
             bind.registered = False
             bind.session_id = None
             agent_id = bind.agent_id
+            # 同一 agent_id の有効 bind が他に無ければキューを破棄する
+            # (resume で別 token を後発行する経路は issue_token が空キューを再用意)。
+            if not any(
+                b.agent_id == agent_id and not b.revoked
+                for b in self._binds.values()
+            ):
+                self._queues[agent_id] = []
         self._journal("token_revoked", agent_id=agent_id, reason=reason)
         return True
 
@@ -287,15 +301,19 @@ class Broker:
     def close_pane(self, pane_id: PaneId) -> list[str]:
         """broker 経由の pane クローズ + 即時 revoke (§4.4)。
 
-        adapter で pane を kill し、その pane の token を revoke する。pane 操作は
+        adapter で pane を kill し、成功時にその pane の token を revoke する。pane 操作は
         Phase 4 で MCP 公開 (worker/curator 非公開) する面なので、ここでは broker
         内部 API として置く (messaging Phase のライフサイクル検証用)。
+
+        kill が例外で失敗した場合は pane が生存している可能性があるため revoke しない
+        (reap_exited_panes の「生存判定不能を退役扱いしない」方針と統一。codex Minor 対応)。
         """
         if self.adapter is not None:
             try:
                 self.adapter.kill_pane(pane_id)
             except Exception as e:
                 self._journal("close_pane_failed", pane_id=pane_id, error=str(e))
+                return []  # kill 失敗 = live pane の可能性。誤 revoke しない
         return self.revoke_pane(pane_id, reason="close_pane")
 
     def suspend(self) -> int:
@@ -439,10 +457,15 @@ class Broker:
         pane_id = target.pane_id
         assert pane_id is not None and self.adapter is not None
         for attempt in range(1, self.nudge_defer_max_tries + 1):
+            # 失効した宛先には打鍵しない (revoke/TTL 後の stale target への
+            # nudge を防ぐ。codex Major 対応)。revoke はキューも空にするため
+            # pending 判定でも止まるが、打鍵直前の TOCTOU 窓を本チェックで閉じる。
+            if not target.is_active():
+                return
             with self._lock:
                 pending = bool(self._queues.get(target.agent_id))
             if not pending:
-                return  # 配達前に drain 済み (再ナッジ不要)
+                return  # 配達前に drain 済み / 失効でキュー破棄 (再ナッジ不要)
             try:
                 state = classify_pane_state(self.adapter.get_text(pane_id))
             except Exception as e:  # adapter 不通は nudge_failed 相当
@@ -476,7 +499,20 @@ class Broker:
 
     # ------------------------------------------------------------- MCP tools
     def call_tool(self, bind: AgentBind, name: str, args: dict) -> dict:
-        """ツール実行。引数不正は ToolArgError (handler 側で -32602 に変換)。"""
+        """ツール実行。引数不正は ToolArgError (handler 側で -32602 に変換)。
+
+        冒頭で bind の有効性を再検証する: HTTP 経路は do_POST の authorize() で
+        既に弾かれるが、revoke/TTL 前に取得した stale AgentBind を直呼びする経路
+        (server-side / テスト) では check_messages / set_summary が素通りしうる。
+        authorize() を「単一権限判定点」とするため、ここでも auth_error を尊重する
+        (codex Major 対応)。
+        """
+        auth_err = bind.auth_error()
+        if auth_err is not None:
+            return {
+                "content": [{"type": "text", "text": f"[{auth_err}] token not active"}],
+                "isError": True,
+            }
         if name == "send_message":
             to_id, message = args.get("to_id"), args.get("message")
             if not isinstance(to_id, str) or not isinstance(message, str):

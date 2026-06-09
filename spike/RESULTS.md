@@ -228,4 +228,12 @@ Phase 1（WezTerm / Windows）と Phase 2（tmux / POSIX）の AC 判定を記�
 - **TTL 既定値は None（失効なし）**: 設計書 §4.4 は「セッション寿命より長い TTL + 退役時 revoke」を基本とし
   TTL を保険と位置付ける。既定は長寿命（None）で、退役 revoke を一次担保とする。実運用 TTL 値の確定は
   本体取り込み時に行う。
-- **codex セルフレビュー**: 本 Phase 3 差分のレビュー結果は PR 本文 / 完了報告に記載。
+- **codex セルフレビュー（round 1）**: Blocker 0 / Major 2 / Minor 2 / Nit 1。全件修正コミット済み:
+  - Major: `call_tool` 冒頭で `auth_error()` 再検証（stale bind 直呼びの素通り遮断）/ `revoke_token` で
+    当該 agent の未読キューを破棄 + `_nudge_worker` に `is_active()` ガード（revoke 後の stale target への
+    nudge・再発行 token への未読漏洩を遮断）。
+  - Minor: idle 宛 nudge 検証を `nudge_sent` + `NUDGE_TEXT` 打鍵まで強化 / `close_pane` は kill 失敗時に
+    誤 revoke しない（reap と方針統一）。
+  - Nit: `broker.py` 冒頭の「TTL/失効・再発行は実装しない」記述を Phase 3 実装済みに更新。
+  - 併せて検証ハーネスの journal 同期 race（`send_line` 記録が journal 追記より先行）を `_wait_event` で解消。
+  - round 2 追レビュー結果は PR 本文 / 完了報告に記載。

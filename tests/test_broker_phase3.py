@@ -141,6 +141,25 @@ class AttributionTest(unittest.TestCase):
         self.assertFalse(res.get("ok"))
         self.assertIn("token_revoked", res.get("error", ""))
 
+    def test_call_tool_rejects_stale_bind(self) -> None:
+        # revoke 前に取得した bind を直呼びしても check_messages / set_summary が
+        # 素通りしないこと (authorize を単一権限判定点にする。codex Major 対応)
+        bind = self.broker._binds[self.a]
+        self.broker.revoke_token(self.a, reason="test")
+        for tool in ("check_messages", "set_summary", "list_peers"):
+            res = self.broker.call_tool(bind, tool, {"summary": "x"})
+            self.assertTrue(res.get("isError"), f"{tool} が失効 bind で素通りした")
+            self.assertIn("token_revoked", res["content"][0]["text"])
+
+    def test_reissue_does_not_inherit_stale_queue(self) -> None:
+        # agent-b 宛に未読を積んでから revoke → 同 agent_id で再発行した token が
+        # 旧ライフサイクルの未読を読めないこと (codex Major 対応)
+        self.broker.enqueue(self.broker.get_bind(self.a), "agent-b", "stale")
+        self.broker.revoke_token(self.b, reason="suspend")
+        new_b = self.broker.issue_token("agent-b", "agent-b", "worker")
+        self.broker.register_local(new_b)
+        self.assertEqual(self.broker.drain(self.broker.get_bind(new_b)), [])
+
 
 class DelegationCycleTest(unittest.TestCase):
     """設計書 §7.3: 6 経路全数往復 + ナッジ defer の統合 GO を CI に常設化する。"""
