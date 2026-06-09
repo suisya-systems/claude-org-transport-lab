@@ -1,7 +1,8 @@
 # renga 依存解消（案 B）— org-broker / terminal adapter 設計
 
 > ステータス: **design only / 実装なし**。本リポジトリにこの設計の実装は一切存在しない。実験はフォークで行い、broker / adapter の実体は claude-org-runtime 側に置く計画である。
-> 本ドキュメントは「未実装の将来設計」であり、以下の記述はすべて**提案・計画**である。現行動作（renga 経由）との対比は [§2「現状とこの設計の関係」](#2-現状とこの設計の関係) を参照。
+> 本ドキュメントは「未実装の将来設計」であり、以下の記述はすべて**提案・計画**である（本体 = claude-org-runtime / ja への取り込みは未了）。現行動作（renga 経由）との対比は [§2「現状とこの設計の関係」](#2-現状とこの設計の関係) を参照。
+> **フォーク実証ステータス（2026-06-10 最終化）**: 本設計のフォーク spike（[`spike/`](../../spike/)）は **Phase 1〜4 + 完動ゲート（Phase 5 / AC-5 / Issue #5）を全項目 GO** で完走した（[`spike/RESULTS.md`](../../spike/RESULTS.md)）。正準 backend は **tmux に確定**（本環境 Linux/WSL2 で実機実証。WezTerm 実機は follow-up Issue #9）。**Epic #6（Plan B / renga 依存解消）完動ゲート = GO**（フォーク側足切り通過、[§7.6](#76-完動ゲートphase-5--ac-5--epic-6-最終ゲート)）。本体取り込み（prose 書き換え・契約改訂・runtime 実装）は ja 不可触制約により別スコープ。
 > 一次入力: ユーザー・窓口間の設計合意ノート（2026-06-07、リポジトリ未コミットの運用ノート `notes/renga-decoupling-design-input-2026-06-07.md`）および Codex design review（同日、`tmp/` 配下の未コミットノート）。いずれも git 管理外のためこのブランチからは参照できないが、**そこで確定した制約・合意事項は [§1](#1-背景と確定制約本設計が覆さない前提) に本文として転記済み**であり、本設計書は単体で読める。本設計はこれらの確定制約を覆さない。
 > 依存ドキュメント（参照は本設計書 → 既存文書の一方向のみ。既存文書側から本設計書への参照追加は行わない）:
 > - [`docs/contracts/backend-interface-contract.md`](../contracts/backend-interface-contract.md)（Contract Set D、2026-05-03 批准。本設計の土台）
@@ -333,6 +334,19 @@ adapter は「messaging adapter（Phase 3 が要求する最小能力）」と�
 
 フォーク組織を本体と並走させる場合、ダッシュボードポート・workers_dir・`.state/`（state.db / broker queue store）の分離が必要。フォーク側の設定で衝突を避ける（実験手順の詳細はフォーク側 README に置く計画で、本体には持ち込まない）。
 
+### 7.6 完動ゲート（Phase 5 / AC-5 / Epic #6 最終ゲート）
+
+> **完動ゲート（2026-06-10）= GO**: Phase 1〜4 で揃った broker + tmux/WezTerm adapter + ペイン操作6面/監視を前提に、フォーク組織が **backend(tmux)のみ・renga 不使用**で 委譲サイクルを**複数回**完走できることを dogfood で実証した（[`spike/RESULTS.md`](../../spike/RESULTS.md) の Phase 5 / AC-5 節、Closes #5）。検証方式は Phase 3/4 同様の **方式 B（FakeAdapter / 無課金・決定的・CI 可）を主**とし、実 tmux cat smoke + **実 Claude worker active 1 サイクル**（窓口経由で人間が token コストを承認）を実機証跡として追加した。
+
+Issue #5 の完了基準 4 項目をすべて GO で満たした:
+
+- **(1) backend(tmux)のみ・renga 不使用で 委譲サイクルを複数回完走** → **実証済み**（AC-5-multi: 単一 broker / adapter 上で 3 サイクル連続完走 + cross-cycle isolation。native id 再利用下でも旧 handle は pane_not_found、inbox / token / event cursor がサイクル間で非漏洩、二重 spawn は `[name_in_use]`。実機は cat 2 サイクル + 実 Claude active 1 サイクル）。
+- **(2) 障害系4種の broker 成立: stall検出 / escalation / handover / resume** → **実証済み**（AC-5-stall: 連続 busy 独立観測→escalation enqueue / AC-5-escalation: defer-then-deliver + token 帰属 + 人間返答の worker 転送 at-most-once / AC-5-handover: ops tier inspect+send_keys でペイン保持引き継ぎ + 監視 cursor 不喪失 / AC-5-resume: suspend 全 revoke + 未読破棄 → token 再発行 → stale 非継承）。
+- **(3) 課金中立の実測（対話 TUI のみ・ヘッドレスに落ちない）** → **実証済み**（AC-5-billing: spawn argv builder が全 spawnable role で `claude --mcp-config` のみ・headless 系 flag 非含有。実 Claude の ps 実 argv も `claude --mcp-config --strict-mcp-config --allowedTools --model sonnet` で `-p`/`--print`/`--headless`/`--output-format` 非含有 + 起動直後 idle `❯` 対話 TUI 描画を観測）。
+- **(4) 設計書最終版（tmux 格上げ + Phase 結果反映）** → 本ドキュメント（status header + 本節 + 改訂履歴で最終化）。
+
+新規ハーネス: [`spike/run_ac5.py`](../../spike/run_ac5.py)（方式 B 6 検証 + 実機 dogfood ランナー）+ CI 常設 [`tests/test_broker_dogfood.py`](../../tests/test_broker_dogfood.py)。設計ノート: [`spike/ac5-design-note.md`](../../spike/ac5-design-note.md)（実装前 codex design review 1 周反映）。**実 Claude active は 1 サイクルのみ**（実在性は Phase 1/2 AC で既証のため、複数サイクルの構造実証は方式 B が担う）。本体取り込み（prose 書き換え・契約改訂・runtime 実装）は ja 不可触制約により別スコープ。
+
 ## 8. 残存リスク（既知・設計時点）
 
 | リスク | 整理 |
@@ -357,3 +371,4 @@ adapter は「messaging adapter（Phase 3 が要求する最小能力）」と�
 - 2026-06-09: Phase 2。tmux adapter（POSIX 正準 backend）を第二実装として追加し、ハーネスを backend パラメータ化。両 backend（tmux/WSL2・WezTerm/Windows）で AC-1 / AC-2 green。§4.7 の tmux 列を「参考」から実測値に格上げし、messaging（Phase 3）/ full backend（Phase 4）の能力境界を 2 表に分離（§4.7.2）。§8 リスク表・§9 スコープ外の tmux 記述を更新（Closes #2）。
 - 2026-06-09: Phase 3（メッセージング移行 / broker 配線）。検証方式 B（broker queue 統合ハーネス / 無課金・決定的・CI 可、ユーザー判断）で §7.3 の完了基準を実証。`spike/run_ac3.py`（FakeAdapter で受信側状態と pane 生死を決定的に駆動）+ CI 常設 `tests/test_broker_phase3.py` を追加し、AC-3（6 経路全数往復・ナッジ defer・なりすまし不可・token ライフサイクル）が全項目 GO。`spike/broker.py` に token ライフサイクル本実装（TTL / pane_exited revoke / close revoke / suspend-resume 再発行、新エラーコード `token_revoked` / `token_expired`＝§5 Surface 6 の MAY 規定内）。実 4 セッション課金実証（方式 A）・分類 (a) prose 書き換え・契約改訂（Set D Surface 2/5・Set C inventory・non-goals §12）は本体取り込みスコープのため本フォークでは未実施（ja 不可触制約）。詳細は [`spike/RESULTS.md`](../../spike/RESULTS.md) の Phase 3 節（Closes #3）。
 - 2026-06-10: Phase 4（ペイン操作移行 / full backend adapter）。検証方式 B（FakeAdapter / 無課金・決定的・CI 可）+ 実 tmux smoke（人間判断で承認、SoT §7.4 の WezTerm 実機要件を本 Linux/WSL2 環境では tmux に読み替え）で §7.4 の完了基準を **全項目 GO** で実証。`spike/run_ac4.py`（geometry / 生死 / 画面状態 / split / send_keys を駆動する Phase 4 用 FakeAdapter + 実 tmux smoke）+ CI 常設 `tests/test_broker_phase4.py`（15 ケース）を追加。`spike/broker.py` に **role-scoped tool 公開**（messaging / ops tier。`tools/list` フィルタ + `[tool_forbidden]` 二重遮断、§4.2）・**ペイン操作 6 面**（`spawn_agent` / `close_pane` / `list_panes` / `inspect_pane` / `send_keys` / `poll_events`）+ `set_pane_identity`・**poll_events 合成**（list_panes 差分から `pane_started`/`pane_exited`/`events_dropped` を単一 lock 下で exactly-once 合成、`_known_panes` record map で exit 後も meta 保持、初回 baseline、count 付き events_dropped）・native id ↔ broker handle 対応を追加。`terminal_adapter.py` に `split`/`send_keys` Protocol + `normalize_key`、`tmux_adapter.py`/`wezterm_adapter.py` に `split`/`send_keys` 実装。**balanced split は現行 split SoT の `claude_org_runtime.dispatcher.runner.choose_split` を再利用**して構造的に現行同等を保証（doc prose は runtime と drift 済みのため移植せず）。事前 codex design review 1 周（Blocker 1 / Major 5 / Minor 3）を実装前に全反映（[`spike/phase4-design-note.md`](../../spike/phase4-design-note.md)）。WezTerm 実機 AC・prose 書き換え（分類 (a)）・契約改訂（Surface 1/3/4・Surface 8 案）は本体取り込みスコープのため本フォークでは未実施（ja 不可触制約）。詳細は [`spike/RESULTS.md`](../../spike/RESULTS.md) の Phase 4 節（Closes #4）。
+- 2026-06-10: **完動ゲート（Phase 5 / AC-5 / Epic #6 最終ゲート、Closes #5）= GO**。フォーク組織が backend(tmux)のみ・renga 不使用で 委譲サイクルを複数回完走できることを dogfood で実証（[§7.6](#76-完動ゲートphase-5--ac-5--epic-6-最終ゲート)）。検証方式 B（FakeAdapter / 無課金・決定的・CI 可）で AC-5 6 検証（multi 3 サイクル連続 + cross-cycle isolation / stall→escalation enqueue / escalation defer + 人間返答転送 at-most-once / handover ペイン保持 + 監視 cursor 不喪失 / resume suspend 全 revoke + 未読破棄 + stale 非継承 / billing argv 構造）を全項目 GO。実機証跡として 実 tmux cat smoke 2 サイクル + **実 Claude worker active 1 サイクル**（人間が token コスト承認、委託→実作業(2+2)→broker 経由完了報告(token 由来 from)→close/revoke 完走）を追加。課金中立は実 argv（ps）に headless/print 系 flag なし + 対話 TUI idle 描画で実測 attestation。`spike/run_ac5.py` + CI 常設 `tests/test_broker_dogfood.py`（FakeAdapter 6 検証 + headless flag guard）+ `spike/ac5-design-note.md`（実装前 codex design review 1 周 = Blocker 2 / Major 7 反映）を追加。正準 backend を tmux に確定。本体取り込み（prose 書き換え・契約改訂・runtime 実装）は ja 不可触制約により別スコープ。詳細は [`spike/RESULTS.md`](../../spike/RESULTS.md) の Phase 5 / AC-5 節。
