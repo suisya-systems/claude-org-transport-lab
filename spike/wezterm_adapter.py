@@ -30,8 +30,28 @@ from terminal_adapter import (  # noqa: F401
     NUDGE_TEXT,
     PaneRef,
     classify_pane_state,
+    normalize_key,
     wait_for_state,
 )
+
+# 正規キー名 → WezTerm send-text に流す制御コード列。WezTerm cli には tmux の
+# ような一級キー名 API が無いため send-text (--no-paste) に端末制御コードを送る。
+# Windows 専用 backend のため本 Phase (Linux/WSL2) では実機検証しない parity 実装。
+_WEZTERM_KEY_CODE = {
+    "Enter": "\r", "Tab": "\t", "Shift+Tab": "\x1b[Z", "Esc": "\x1b",
+    "Backspace": "\x7f", "Delete": "\x1b[3~",
+    "Up": "\x1b[A", "Down": "\x1b[B", "Right": "\x1b[C", "Left": "\x1b[D",
+    "Home": "\x1b[H", "End": "\x1b[F", "PageUp": "\x1b[5~", "PageDown": "\x1b[6~",
+    "Space": " ",
+}
+
+
+def _wezterm_key_code(key: str) -> str:
+    """正規キー名を WezTerm 向け制御コードへ。未知は ValueError。"""
+    norm = normalize_key(key)
+    if norm.startswith("Ctrl+"):
+        return chr(ord(norm[5:].upper()) - 0x40)  # Ctrl+A -> \x01
+    return _WEZTERM_KEY_CODE[norm]
 
 WEZTERM_DEFAULT_EXE = r"C:\Program Files\WezTerm\wezterm.exe"
 
@@ -159,6 +179,56 @@ class WezTermAdapter:
     def kill_pane(self, pane_id: int) -> None:
         """spawn した検証 pane の後始末 (kill-pane)。spike 内部用。"""
         self._cli("kill-pane", "--pane-id", str(pane_id), check=False)
+
+    # ----------------------------------------------------- Phase 4 full backend
+    def split(
+        self,
+        target: int,
+        argv: list[str],
+        cwd: str | None = None,
+        direction: str = "vertical",
+    ) -> PaneRef:
+        """既存 pane (`target`) を分割して新 pane に argv を起動する。
+
+        renga 慣習に揃える: `vertical`=左右 → WezTerm `--horizontal`、
+        `horizontal`=上下 → 既定 (下)。balanced split の target/direction は
+        broker が geometry から決める (本メソッドは指示を実行するだけ)。
+        Windows 専用 backend のため本 Phase (Linux/WSL2) では parity 実装。
+        """
+        args = ["split-pane", "--pane-id", str(target)]
+        if direction == "vertical":
+            args.append("--horizontal")
+        if cwd:
+            args += ["--cwd", cwd]
+        args += ["--", *argv]
+        proc = self._cli(*args)
+        pane_id = int(proc.stdout.strip())
+        ref = PaneRef(pane_id=pane_id)
+        for p in self.list_panes():
+            if p["pane_id"] == pane_id:
+                ref.tab_id = p["tab_id"]
+                ref.window_id = p["window_id"]
+                break
+        return ref
+
+    def send_keys(
+        self,
+        pane_id: int,
+        text: str | None = None,
+        keys: list[str] | None = None,
+        enter: bool = False,
+    ) -> None:
+        """raw PTY 入力 (Set D Surface 1.9)。WezTerm は制御コードを send-text する。
+
+        text (literal) → keys[] (キー名語彙→制御コード) → enter (CR) の順。
+        未知キー名は ValueError (broker 側で invalid-params に変換される)。
+        """
+        if text:
+            self.send_text(pane_id, text, no_paste=True)
+        for k in keys or []:
+            self.send_text(pane_id, _wezterm_key_code(k), no_paste=True)
+        if enter:
+            self.send_text(pane_id, "\r", no_paste=True)
 
 
 # 画面状態ヒューリスティック (classify_pane_state / wait_for_state) は

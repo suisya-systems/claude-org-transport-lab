@@ -32,12 +32,50 @@ from terminal_adapter import (
     TerminalAdapter,
     classify_pane_state,
     make_adapter,
+    normalize_key,
 )
 
 PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 SERVER_INFO = {"name": "org-broker-spike", "version": "0.1.0"}
 
-TOOLS = [
+# ---------------------------------------------------------------------------
+# role-scoped tool 公開 (設計書 §4.2)。tier で公開面を変え、worker/curator から
+# pane 操作を tools/list にも出さず・呼べなくする (許可設定ではなく構造的遮断)。
+# ---------------------------------------------------------------------------
+TIER_MESSAGING = 0  # worker / curator
+TIER_OPS = 1        # dispatcher / secretary
+
+# role → tier。未知 role は最小権限 (messaging) に倒す (fail-safe)。
+ROLE_TIER = {
+    "worker": TIER_MESSAGING,
+    "curator": TIER_MESSAGING,
+    "dispatcher": TIER_OPS,
+    "secretary": TIER_OPS,
+}
+
+# spawn_agent が発行できる新 token の role (caller tier 昇格を構造的に禁じる)。
+SPAWNABLE_ROLES = ("worker", "curator")
+
+
+def role_tier(role: str) -> int:
+    return ROLE_TIER.get(role, TIER_MESSAGING)
+
+
+# ASCII の `[A-Za-z0-9_-]` のみを許す集合。str.isalnum() は Unicode 英数字も通すため
+# 明示集合で ASCII 契約に揃える (codex Minor 対応)。
+_FILENAME_SAFE_CHARS = frozenset(
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+)
+
+
+def is_filename_safe(s: str) -> bool:
+    """`[A-Za-z0-9_-]` (ASCII) のみ・非空。agent_id を config ファイル名に使う際の path
+    traversal (`../`・絶対パス) を構造的に防ぐ (Set D name 文字種に整合)。"""
+    return bool(s) and all(c in _FILENAME_SAFE_CHARS for c in s)
+
+
+# messaging tier (worker/curator 含む全 role) に公開する 4 面。
+_MESSAGING_TOOLS = [
     {
         "name": "send_message",
         "description": "Send a message to another agent via the broker queue.",
@@ -71,6 +109,108 @@ TOOLS = [
     },
 ]
 
+# ops tier (dispatcher / secretary) のみに公開する pane 操作面 (Phase 4 の 6 面 +
+# Surface 1.8 継承の set_pane_identity)。worker/curator の token では tools/list に
+# 現れず、call_tool でも [tool_forbidden] で弾かれる。
+_OPS_TOOLS = [
+    {
+        "name": "spawn_agent",
+        "description": "Balanced-split spawn a new agent pane (dispatcher/secretary only).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "agent_id": {"type": "string"},
+                "name": {"type": "string"},
+                "role": {"type": "string", "enum": list(SPAWNABLE_ROLES)},
+                "argv": {"type": "array", "items": {"type": "string"}},
+                "cwd": {"type": "string"},
+                "target": {"type": "integer", "description": "pane handle (省略=balanced split)"},
+                "direction": {"type": "string", "enum": ["vertical", "horizontal"]},
+            },
+            "required": ["agent_id", "name", "role", "argv"],
+        },
+    },
+    {
+        "name": "close_pane",
+        "description": "Close a pane by handle and revoke its token (dispatcher/secretary only).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"target": {"type": "integer"}},
+            "required": ["target"],
+        },
+    },
+    {
+        "name": "list_panes",
+        "description": "Enumerate panes with geometry + role (dispatcher/secretary only).",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "inspect_pane",
+        "description": "Grid-scrape a pane's screen (dispatcher/secretary only).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "integer"},
+                "lines": {"type": "integer"},
+                "include_cursor": {"type": "boolean"},
+            },
+            "required": ["target"],
+        },
+    },
+    {
+        "name": "send_keys",
+        "description": "Write raw PTY input to a pane (dispatcher/secretary only).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "integer"},
+                "text": {"type": "string"},
+                "keys": {"type": "array", "items": {"type": "string"}},
+                "enter": {"type": "boolean"},
+            },
+            "required": ["target"],
+        },
+    },
+    {
+        "name": "poll_events",
+        "description": "Long-poll synthesized pane lifecycle events (dispatcher/secretary only).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "since": {"type": "string"},
+                "timeout_ms": {"type": "integer"},
+                "types": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+    },
+    {
+        "name": "set_pane_identity",
+        "description": "Rename/relabel a pane's name/role (dispatcher/secretary only).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "integer"},
+                "name": {"type": "string"},
+                "role": {"type": "string"},
+            },
+            "required": ["target"],
+        },
+    },
+]
+
+# tool 名 → 必要 tier。tools/list と call_tool の単一判定表。
+TOOL_TIER = {t["name"]: TIER_MESSAGING for t in _MESSAGING_TOOLS}
+TOOL_TIER.update({t["name"]: TIER_OPS for t in _OPS_TOOLS})
+
+# 互換: 旧 import `from broker import TOOLS` を壊さない (全 tool の列挙)。
+TOOLS = _MESSAGING_TOOLS + _OPS_TOOLS
+
+
+def tools_for_role(role: str) -> list[dict]:
+    """role tier で公開する tool 一覧 (tools/list のフィルタ)。"""
+    tier = role_tier(role)
+    return [t for t in TOOLS if TOOL_TIER[t["name"]] <= tier]
+
 
 class ToolArgError(ValueError):
     """tools/call の引数不正 (JSON-RPC -32602 invalid params に変換される)。"""
@@ -84,6 +224,11 @@ class AgentBind:
     agent_id: str
     name: str
     role: str
+    # 権限 tier を決める **不変** role。issue_token でのみ設定し set_pane_identity からは
+    # 変更不可 (codex Blocker 対応: 可変 role でのツール権限昇格を構造的に断つ)。
+    # `role` は list_peers / list_panes 表示用の可変ラベル (Set D §1.8) であり、権限判定は
+    # auth_role のみを見る。空文字は最小権限 (messaging) に倒れる (role_tier の fail-safe)。
+    auth_role: str = ""
     pane_id: PaneId | None = None     # backend ネイティブ型 (WezTerm=int / tmux="%N"=str)
     registered: bool = False          # MCP initialize 到達で True (AC-2-3 の検知点)
     registered_at: float | None = None
@@ -123,6 +268,8 @@ class Broker:
         nudge_defer_interval: float = 2.0,
         nudge_defer_max_tries: int = 30,
         default_token_ttl: float | None = None,
+        event_cap: int = 1000,
+        event_poll_interval: float = 0.5,
     ):
         self.state_dir = Path(state_dir)
         self.state_dir.mkdir(parents=True, exist_ok=True)
@@ -144,6 +291,30 @@ class Broker:
         self._nudge_threads: dict[str, tuple[threading.Thread, str]] = {}
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+
+        # --- Phase 4: poll_events 合成 + pane handle (全て self._lock 下で扱う) ---
+        self.event_cap = event_cap                  # ring 上限 (超過分は drop)
+        self.event_poll_interval = event_poll_interval
+        self._events: list[dict] = []               # 単調 seq 昇順のイベント列
+        self._event_seq = 0                         # 直近採番 seq
+        self._dropped_total = 0                      # ring trim で捨てた累計
+        # 既知 pane の record map: native_id -> {name, role, agent_id}。
+        # id 集合ではなく map にすることで pane_exited 後も meta を payload に載せる
+        # (exit 後は list_panes から name/role を復元できない。codex Major 対応)。
+        self._known_panes: dict[PaneId, dict] = {}
+        self._baseline_done = False                 # 初回 = 「今以降」(履歴 replay 無し)
+        # native pane id ↔ broker handle (Set D 数値 id 面)。MCP は handle で話し、
+        # 内部 (bind / adapter) は native を使う。choose_split も handle を id に取る。
+        self._pane_handles: dict[PaneId, int] = {}
+        self._handle_to_native: dict[int, PaneId] = {}
+        self._handle_seq = 0
+        # reconcile は backend I/O (list_panes) を伴うため _lock の外で行い、診断の
+        # 一意性は専用 lock で直列化する (codex Minor 対応: _lock を I/O 越しに保持
+        # しない = auth/messaging/close を reconcile の遅延で詰まらせない)。
+        self._reconcile_lock = threading.Lock()
+        # pane_exited 合成時に revoke すべき native の保留集合。revoke_token は _lock を
+        # 取り直すため、合成 (lock 下) では集めるだけにし lock 解放後に適用する。
+        self._pending_exit_revokes: list[PaneId] = []
 
     # ------------------------------------------------------------- lifecycle
     def start(self) -> None:
@@ -192,18 +363,30 @@ class Broker:
         role: str,
         pane_id: PaneId | None = None,
         ttl: float | None = None,
-    ) -> str:
+        reject_if_active: bool = False,
+    ) -> str | None:
         """spawn 時の per-agent token 発行 (設計書 §4.4)。
 
         ttl を与えると発行時刻 + ttl 秒で失効する (None=失効なし)。設計書 §4.4 は
         「セッション寿命より長い TTL + 退役時 revoke」を基本とし、TTL は失効漏れの
         保険と位置付ける。suspend/resume をまたいだ token 再利用は不可 (resume は
         本メソッドの再呼出で別 token を再発行する。旧 token は revoke 済みのまま)。
+
+        reject_if_active=True のとき、同一 agent_id / name の有効 bind が既に在れば
+        **同一ロック下で** None を返す (発行しない)。check-then-act を避け、
+        ThreadingHTTPServer 配下の並行 spawn での二重発行 race を構造的に断つ
+        (queue は agent_id 単位の inbox なので二重 spawn は message 横取りを生む。
+        codex round 4 Major 対応)。spawn_agent からのみ True で呼ぶ。
         """
         ttl = self.default_token_ttl if ttl is None else ttl
         now = time.time()
         token = secrets.token_urlsafe(32)
         with self._lock:
+            if reject_if_active and any(
+                b.is_active(now) and (b.agent_id == agent_id or b.name == name)
+                for b in self._binds.values()
+            ):
+                return None  # caller は [name_in_use] にマップする (発行も journal もしない)
             # 既存の有効 bind が他に無い agent_id への発行 = 新規ライフサイクルの
             # 開始 (初回 spawn / 退役・TTL 失効後の resume 再発行)。この場合は旧
             # ライフサイクルの未読キューを破棄して継承を断つ。TTL 失効は revoke_token
@@ -215,8 +398,9 @@ class Broker:
                 for b in self._binds.values()
             )
             self._binds[token] = AgentBind(
-                token=token, agent_id=agent_id, name=name, role=role, pane_id=pane_id,
-                issued_at=now,
+                token=token, agent_id=agent_id, name=name, role=role,
+                auth_role=role,  # 不変。権限 tier の唯一の根拠 (set_pane_identity で変わらない)
+                pane_id=pane_id, issued_at=now,
                 expires_at=(now + ttl) if ttl is not None else None,
             )
             if had_active:
@@ -549,6 +733,428 @@ class Broker:
             error="defer retries exhausted",
         )
 
+    # ===================================================================
+    # Phase 4: pane handle / poll_events 合成 / pane 操作 (ops tier)
+    # ===================================================================
+
+    # --- handle / target 解決 (全て self._lock 下で呼ぶ) -------------------
+    def _handle_for_locked(self, native: PaneId) -> int:
+        h = self._pane_handles.get(native)
+        if h is None:
+            self._handle_seq += 1
+            h = self._handle_seq
+            self._pane_handles[native] = h
+            self._handle_to_native[h] = native
+        return h
+
+    def _pane_meta_locked(self, native: PaneId) -> dict:
+        """native pane に bind された有効 agent の name/role/agent_id を解決。"""
+        for b in self._binds.values():
+            if b.pane_id == native and not b.revoked:
+                return {"name": b.name, "role": b.role, "agent_id": b.agent_id}
+        return {"name": None, "role": None, "agent_id": None}
+
+    def _resolve_target(self, target) -> PaneId | None:
+        """MCP target (broker handle = int / 全桁数字 str) を native pane id へ。
+
+        Set D §4.1: 全桁数字は id 解釈。未知 handle は None (caller が
+        pane_not_found 化)。MCP 面は handle で話し native を露出しない。
+        """
+        try:
+            h = int(target)
+        except (TypeError, ValueError):
+            return None
+        with self._lock:
+            return self._handle_to_native.get(h)
+
+    # --- poll_events 合成 (唯一の合成点。exactly-once は単一 lock で担保) ----
+    def _emit_locked(self, etype: str, native: PaneId, meta: dict) -> int:
+        """イベント 1 件を log に積む (単一 lock 下で唯一 emit。exactly-once 担保)。
+
+        payload は **broker handle (`id`) のみ** を露出し native pane id は載せない
+        (MCP 面は handle で話す。WezTerm の native int と handle int の取り違え回避。
+        codex Major 対応)。返り値は採番した handle (exit 時の handle 掃除に使う)。
+        """
+        self._event_seq += 1
+        handle = self._handle_for_locked(native)
+        ev = {
+            "seq": self._event_seq,
+            "type": etype,
+            "id": handle,                            # broker handle (Set D 数値 id)
+            "name": meta.get("name"),
+            "role": meta.get("role"),
+            "agent_id": meta.get("agent_id"),
+            "ts": time.time(),
+        }
+        self._events.append(ev)
+        if len(self._events) > self.event_cap:
+            overflow = len(self._events) - self.event_cap
+            self._dropped_total += overflow
+            del self._events[:overflow]
+        return handle
+
+    def _diff_emit_locked(self, raw: list[dict]) -> None:
+        """list_panes スナップショット (raw) と _known_panes の差分を合成する (_lock 下)。
+
+        I/O (list_panes) は呼出側が _lock の外で取得済み。本メソッドは差分計算と emit のみ。
+        pane_exited 時は (1) revoke を保留集合へ積み (pane 退役時 revoke、§4.4)、
+        (2) handle 対応を掃除する (native id 再利用で stale handle が再対応しない。codex Major 対応)。
+        """
+        current: dict[PaneId, dict] = {}
+        for rec in raw:
+            nid = rec.get("pane_id")
+            if nid is None:
+                continue
+            current[nid] = self._pane_meta_locked(nid)
+        if not self._baseline_done:
+            self._known_panes = current
+            self._baseline_done = True
+            return
+        for nid, meta in current.items():
+            if nid not in self._known_panes:
+                self._emit_locked("pane_started", nid, meta)
+        for nid in list(self._known_panes):
+            if nid not in current:
+                # exit 後は meta を復元できないため直近スナップショットの meta を使う
+                handle = self._emit_locked("pane_exited", nid, self._known_panes[nid])
+                self._pending_exit_revokes.append(nid)  # lock 解放後に revoke
+                self._handle_to_native.pop(handle, None)  # handle 対応を掃除
+                self._pane_handles.pop(nid, None)
+        self._known_panes = current
+
+    def _apply_pending_revokes(self) -> None:
+        """pane_exited で積んだ native の token を revoke する (_lock 解放後に呼ぶ)。
+
+        pane 退役 = 即時 revoke (§4.4)。broker 非経由 kill / crash でも poll_events の
+        reconcile が pane_exited を合成した時点で token を失効させ、漏洩面を閉じる
+        (reap_exited_panes の明示呼出を待たない。codex Major 対応)。revoke は冪等なので
+        close_pane で既に revoke 済みでも二重作用はしない。
+        """
+        with self._lock:
+            pend = self._pending_exit_revokes
+            self._pending_exit_revokes = []
+        for native in pend:
+            self.revoke_pane(native, reason="pane_exited")
+
+    def _collect_events_locked(self, since, types) -> dict:
+        """cursor (since) より後のイベントを返す (Set D §3.1 の cursor-based long-poll)。
+
+        本面は **replayable な cursor 読み出し** であり破壊的 queue ではない: 同一 since の
+        並行 poll は同じイベントを返す (caller が next_since でカーソルを前進させる renga と
+        同型のセマンティクス)。Set D の exactly-once は「イベントの **emit** が close/crash
+        ごとに 1 回」であり (それは _diff_emit_locked が単一 lock + _reconcile_lock 直列化で
+        担保する)、「1 reader へ 1 回 deliver」ではない (cursor モデルは再読を許す)。
+        """
+        max_seq = self._event_seq
+        if since is None:
+            # 初回 = 「今以降」: 履歴を返さず現在 seq をカーソルにする (Set D §3.1)
+            return {"events": [], "next_since": str(max_seq)}
+        try:
+            since_i = int(since)
+        except (TypeError, ValueError):
+            since_i = 0
+        earliest = self._events[0]["seq"] if self._events else (max_seq + 1)
+        if self._events and since_i < earliest - 1:
+            # since 以降〜最古保持の手前までを取りこぼした (ring trim)。Set D §3.1:
+            # count 付き events_dropped を返し、caller は list_panes reconcile する。
+            dropped = (earliest - 1) - since_i
+            ev = {
+                "seq": earliest - 1, "type": "events_dropped",
+                "count": dropped, "ts": time.time(),
+            }
+            return {"events": [ev], "next_since": str(earliest - 1)}
+        evs = [e for e in self._events if e["seq"] > since_i]
+        if types:
+            evs = [e for e in evs if e["type"] in types]
+        # types フィルタで全件落ちても next_since は max_seq まで進める
+        # (filtered-out を越えてカーソル前進。Set D §3.1 の重複スキャン回避)
+        return {"events": evs, "next_since": str(max_seq)}
+
+    def poll_events(self, since=None, timeout_ms: int = 2000, types=None) -> dict:
+        """合成イベントの cursor 付き long-poll (Set D Surface 3)。
+
+        timeout_ms は 30000ms にクランプ。イベント発生で早期 return、無ければ
+        interval で reconcile を回し timeout で空応答 + 前進カーソルを返す。
+        """
+        timeout = min(max(int(timeout_ms), 0), 30000) / 1000.0
+        deadline = time.monotonic() + timeout
+        while True:
+            self._reconcile()  # backend I/O は _lock 外。差分 emit + revoke 適用を含む
+            with self._lock:
+                result = self._collect_events_locked(since, types)
+            if result["events"] or timeout <= 0 or time.monotonic() >= deadline:
+                return result
+            time.sleep(min(self.event_poll_interval, max(deadline - time.monotonic(), 0)))
+
+    def _reconcile(self) -> None:
+        """list_panes 差分からイベントを合成する (唯一の合成点)。
+
+        backend I/O (list_panes) は _lock の外で実行し、合成の一意性は _reconcile_lock で
+        直列化する (二重 reconcile による pane_exited 二重 emit を防ぐ = exactly-once、
+        かつ _lock を I/O 越しに保持しない)。adapter 不通時は何も合成しない (誤合成回避)。
+        spawn/close 直後の即時合成や poll_events のループから呼ぶ。
+        """
+        if self.adapter is None:
+            return
+        with self._reconcile_lock:
+            try:
+                raw = self.adapter.list_panes()
+            except Exception:
+                return  # adapter_unavailable: 生存判定不能を「退役」と扱わない
+            with self._lock:
+                self._diff_emit_locked(raw)
+        self._apply_pending_revokes()
+
+    # --- pane 操作 (ops tier) ---------------------------------------------
+    def mcp_list_panes(self) -> list[dict]:
+        """geometry + role 付き pane 一覧 (Set D §1.5)。MCP 面は handle で話す。
+
+        adapter の生 geometry (tmux: left/top, WezTerm: size) を正規化し、
+        name/role は bind 表から付与する (adapter 自体は role を知らない)。
+        """
+        if self.adapter is None:
+            raise ToolArgError("[adapter_unavailable] no terminal backend")
+        raw = self.adapter.list_panes()  # backend I/O は _lock の外で取得する
+        out: list[dict] = []
+        with self._lock:
+            for rec in raw:
+                nid = rec.get("pane_id")
+                if nid is None:
+                    continue
+                meta = self._pane_meta_locked(nid)
+                # MCP 面は broker handle (`id`) のみで pane を指す。native id は露出しない
+                # (WezTerm の native int と handle int の取り違え回避。codex Major 対応)。
+                rc = {
+                    "id": self._handle_for_locked(nid),
+                    "name": meta["name"],
+                    "role": meta["role"],
+                    "focused": bool(rec.get("focused", rec.get("active", False))),
+                    "x": int(rec.get("x", rec.get("left", 0))),
+                    "y": int(rec.get("y", rec.get("top", 0))),
+                    "width": int(rec["width"]),
+                    "height": int(rec["height"]),
+                }
+                if "cursor_x" in rec:
+                    rc["cursor_x"] = rec["cursor_x"]
+                    rc["cursor_y"] = rec["cursor_y"]
+                out.append(rc)
+        return out
+
+    def resolve_balanced_split(self, panes_records: list[dict]):
+        """現行 renga 同等の balanced split (claude_org_runtime.choose_split 再利用)。
+
+        最大ペイン選択ではなく、role priority / MIN_PANE / SECRETARY 保険 /
+        dispatcher 隣接 / (priority desc, metric desc, id asc) sort / capacity 検出を
+        含む runtime SoT をそのまま使う (prose は runtime と drift 済みのため移植不可)。
+        返り値: SplitChoice | None (None=候補空=split_capacity_exceeded)。
+        """
+        from claude_org_runtime.dispatcher import runner  # lazy (declared dependency)
+
+        panes = [
+            runner.Pane(
+                id=r["id"], name=r["name"], role=r["role"],
+                focused=r["focused"], x=r["x"], y=r["y"],
+                width=r["width"], height=r["height"],
+            )
+            for r in panes_records
+        ]
+        return runner.choose_split(panes)
+
+    def _write_agent_mcp_config(self, agent_id: str, token: str) -> Path:
+        """per-agent の mcp-config を 0600 で書き出す (§4.4 の token 受け渡し経路)。
+
+        token は queue store / journal には平文で書かない方針 (§4.4) だが、起動引数
+        `--mcp-config` 経由の受け渡しは §4.4 が明示的に認める 0600 一時ファイル経路。
+        """
+        cfg_dir = self.state_dir / "agents"
+        cfg_dir.mkdir(parents=True, exist_ok=True)
+        path = cfg_dir / f"{agent_id}.mcp.json"
+        path.write_text(
+            json.dumps(self.mcp_config_for(token), ensure_ascii=False),
+            encoding="utf-8",
+        )
+        try:
+            import os as _os
+            _os.chmod(path, 0o600)
+        except OSError:
+            pass  # Windows 等で chmod 非対応でも config 自体は書ける
+        return path
+
+    def spawn_agent(
+        self, agent_id: str, name: str, role: str, argv: list[str],
+        cwd: str | None = None, target: int | None = None,
+        direction: str | None = None, ttl: float | None = None,
+        inject_mcp_config: bool = True,
+    ) -> dict:
+        """balanced split で新 agent pane を spawn + token 発行 + bind (設計書 §4.6)。
+
+        起動チェーン (§4.6 段階 1): token を **先に** 発行し、per-agent の `--mcp-config`
+        (0600) を起動 argv に注入してから split する。spawn された worker はこの config で
+        broker に接続し initialize handshake で registered になる (登録検知は §4.6 段階 4)。
+        起動チェーン自体は Phase 1/2 AC-2 で両 backend 実証済み。
+
+        target 省略時は choose_split が geometry から split 対象/方向を決める。候補が無ければ
+        split_capacity_exceeded を返す (spawn せず escalate 相当)。実 Claude を起動しない
+        プローブ (cat 等) では inject_mcp_config=False を渡す (config を消費できないため)。
+        """
+        if self.adapter is None:
+            return {"ok": False, "error": "[adapter_unavailable] no terminal backend"}
+        if role not in SPAWNABLE_ROLES:
+            return {"ok": False,
+                    "error": f"[invalid-params] role must be one of {SPAWNABLE_ROLES}"}
+        # agent_id は per-agent config のファイル名に使う。filename-safe を強制して
+        # `../` / 絶対パスで state_dir 外へ token 入り config を書く経路を断つ (codex Major)。
+        if not is_filename_safe(agent_id):
+            return {"ok": False,
+                    "error": "[name_invalid] agent_id must match [A-Za-z0-9_-]"}
+        records = self.mcp_list_panes()
+        if target is None:
+            choice = self.resolve_balanced_split(records)
+            if choice is None:
+                return {"ok": False,
+                        "error": "[split_capacity_exceeded] no balanced-split candidate"}
+            target_native = self._resolve_target(choice.target_id)
+            direction = choice.direction
+        else:
+            target_native = self._resolve_target(target)
+            direction = direction or "vertical"
+        if target_native is None:
+            return {"ok": False, "error": "[pane_not_found] split target unresolved"}
+        # token を先に発行し (§4.4 発行=spawn 要求時点)、起動 argv に config を注入する。
+        # reject_if_active=True で「重複判定 + 予約」を単一ロック下に閉じ、並行 spawn の
+        # 二重発行 race を断つ (codex round 4 Major 対応)。queue は agent_id 単位 inbox。
+        tok = self.issue_token(agent_id, name, role, pane_id=None, ttl=ttl,
+                               reject_if_active=True)
+        if tok is None:
+            return {"ok": False,
+                    "error": f"[name_in_use] active agent_id/name '{agent_id}' exists"}
+        launch_argv = list(argv)
+        if inject_mcp_config:
+            cfg_path = self._write_agent_mcp_config(agent_id, tok)
+            launch_argv += ["--mcp-config", str(cfg_path)]
+        try:
+            ref = self.adapter.split(target_native, launch_argv, cwd=cwd, direction=direction)
+        except Exception as e:
+            # 失敗時は発行済み token を revoke して漏洩面を残さない。adapter 例外文字列は
+            # argv (token-bearing になりうる) を含むため MCP 応答へ素通ししない (codex Major)。
+            self.revoke_token(tok, reason="spawn_failed")
+            self._journal("spawn_failed", agent_id=agent_id, error=str(e))
+            return {"ok": False, "error": "[io_error] split failed"}
+        self.bind_pane(tok, ref.pane_id)  # pane id 確定後に token↔pane を bind
+        self._reconcile()  # 新 pane を pane_started として即時合成 + handle 採番
+        with self._lock:
+            handle = self._handle_for_locked(ref.pane_id)
+        return {
+            "ok": True, "pane_id": ref.pane_id, "handle": handle,
+            "direction": direction, "token": tok,  # token / pane_id は MCP 応答で除去する
+        }
+
+    def inspect_pane(self, target, lines: int | None = None,
+                     include_cursor: bool = False) -> dict:
+        """pane の grid scrape (Set D §1.7)。lines で末尾 N 行トリム。"""
+        if self.adapter is None:
+            return {"ok": False, "error": "[adapter_unavailable] no terminal backend"}
+        native = self._resolve_target(target)
+        if native is None:
+            return {"ok": False, "error": "[pane_not_found] unknown pane handle"}
+        try:
+            text = self.adapter.get_text(native)
+        except Exception as e:
+            self._journal("inspect_pane_failed", error=str(e))
+            return {"ok": False, "error": "[io_error] get_text failed"}
+        if lines is not None and lines >= 0:
+            text = "\n".join(text.splitlines()[-lines:]) if lines else ""
+        result = {"ok": True, "text": text,
+                  "state": classify_pane_state(text)}
+        if include_cursor:
+            try:
+                for rec in self.adapter.list_panes():
+                    if rec.get("pane_id") == native and "cursor_x" in rec:
+                        result["cursor"] = {"x": rec["cursor_x"], "y": rec["cursor_y"]}
+                        break
+            except Exception:
+                pass  # cursor は best-effort (WezTerm 等は欠落)
+        return result
+
+    def send_keys_op(self, target, text=None, keys=None, enter: bool = False) -> dict:
+        """raw PTY 入力 (Set D §1.9)。未知キー名は invalid-params。"""
+        if self.adapter is None:
+            return {"ok": False, "error": "[adapter_unavailable] no terminal backend"}
+        native = self._resolve_target(target)
+        if native is None:
+            return {"ok": False, "error": "[pane_not_found] unknown pane handle"}
+        # キー語彙は broker 側で検証する (Set D §1.9 invalid-params)。adapter 実装に
+        # 依らず単一判定点とする (FakeAdapter 等は検証しないため)。
+        if keys:
+            try:
+                for k in keys:
+                    normalize_key(k)
+            except ValueError as e:
+                return {"ok": False, "error": f"[invalid-params] {e}"}
+        try:
+            self.adapter.send_keys(native, text=text, keys=keys, enter=enter)
+        except ValueError as e:
+            return {"ok": False, "error": f"[invalid-params] {e}"}
+        except Exception as e:
+            self._journal("send_keys_failed", error=str(e))
+            return {"ok": False, "error": "[io_error] send_keys failed"}
+        return {"ok": True}
+
+    def set_pane_identity(self, target, name=None, role=None) -> dict:
+        """pane の bind の **表示** name/role を更新 (Set D §1.8 継承)。name は検証する。
+
+        ここで更新する `role` は list_peers / list_panes 表示用のラベルであり、権限 tier を
+        決める `auth_role` (issue_token で確定・不変) には一切影響しない。ops token が worker
+        pane に role="dispatcher" を設定しても、その worker の token は ops 面に昇格しない
+        (codex Blocker 対応: 可変メタデータでの権限昇格を構造的に断つ)。
+        """
+        native = self._resolve_target(target)
+        if native is None:
+            return {"ok": False, "error": "[pane_not_found] unknown pane handle"}
+        if name is not None:
+            if not name or name.isdigit() or not all(
+                c.isalnum() or c in "_-" for c in name
+            ):
+                return {"ok": False, "error": "[name_invalid] bad pane name"}
+        with self._lock:
+            for b in self._binds.values():
+                if b.pane_id == native and not b.revoked:
+                    if name is not None and any(
+                        ob.name == name and ob.pane_id != native and not ob.revoked
+                        for ob in self._binds.values()
+                    ):
+                        return {"ok": False, "error": "[name_in_use] name collision"}
+                    if name is not None:
+                        b.name = name
+                    if role is not None:
+                        b.role = role
+                    return {"ok": True, "name": b.name, "role": b.role}
+        return {"ok": False, "error": "[pane_not_found] no active bind for pane"}
+
+    def close_pane_target(self, target) -> dict:
+        """MCP close: handle → native 解決 + kill + revoke (Set D §1.4)。
+
+        pane_exited は次の poll_events reconcile で合成される (pane が list_panes
+        から消えるため。直 kill 取りこぼしと同一経路で構造的に回復)。
+        """
+        native = self._resolve_target(target)
+        if native is None:
+            return {"ok": False, "error": "[pane_not_found] unknown pane handle"}
+        revoked = self.close_pane(native)  # 既存内部 API (kill + 生存確認 + revoke)
+        # kill 失敗 / pane 残存時は close_pane が [] を返す。pane が実際に消えたかを
+        # 確認し、残存していれば ok=False を返す (呼び手が ok だけで成否を判断できる。
+        # codex Minor 対応)。生存判定不能 (adapter 不通) 時は close の意図を尊重し ok=True。
+        try:
+            still_alive = self.adapter.pane_exists(native) if self.adapter else False
+        except Exception:
+            still_alive = False
+        if still_alive:
+            return {"ok": False, "error": "[io_error] pane still alive after close",
+                    "handle": int(target)}
+        # MCP 面は handle で話す。native id は応答に載せない (handle 取り違え回避)。
+        # `closed` は revoke した agent_id のリスト (pane id ではない)。
+        return {"ok": True, "closed": revoked, "handle": int(target)}
+
     # ------------------------------------------------------------- MCP tools
     def call_tool(self, bind: AgentBind, name: str, args: dict) -> dict:
         """ツール実行。引数不正は ToolArgError (handler 側で -32602 に変換)。
@@ -563,6 +1169,18 @@ class Broker:
         if auth_err is not None:
             return {
                 "content": [{"type": "text", "text": f"[{auth_err}] token not active"}],
+                "isError": True,
+            }
+        # role-scoped 公開 (設計書 §4.2): tier 外ツールは構造的に拒否する。
+        # worker/curator の token では pane 操作が tools/list にも出ず、ここでも
+        # [tool_forbidden] で弾かれる (許可設定ではなく権限分離)。
+        required = TOOL_TIER.get(name)
+        if required is not None and required > role_tier(bind.auth_role):
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": f"[tool_forbidden] '{name}' not available to role '{bind.auth_role}'",
+                }],
                 "isError": True,
             }
         if name == "send_message":
@@ -593,6 +1211,55 @@ class Broker:
             with self._lock:
                 bind.summary = summary
             result = {"ok": True}
+        elif name == "list_panes":
+            result = {"panes": self.mcp_list_panes()}
+        elif name == "inspect_pane":
+            target = args.get("target")
+            if target is None:
+                raise ToolArgError("inspect_pane requires target")
+            result = self.inspect_pane(
+                target, lines=args.get("lines"),
+                include_cursor=bool(args.get("include_cursor", False)),
+            )
+        elif name == "send_keys":
+            target = args.get("target")
+            if target is None:
+                raise ToolArgError("send_keys requires target")
+            result = self.send_keys_op(
+                target, text=args.get("text"), keys=args.get("keys"),
+                enter=bool(args.get("enter", False)),
+            )
+        elif name == "poll_events":
+            result = self.poll_events(
+                since=args.get("since"),
+                timeout_ms=int(args.get("timeout_ms", 2000)),
+                types=args.get("types"),
+            )
+        elif name == "close_pane":
+            target = args.get("target")
+            if target is None:
+                raise ToolArgError("close_pane requires target")
+            result = self.close_pane_target(target)
+        elif name == "spawn_agent":
+            for req in ("agent_id", "name", "role", "argv"):
+                if args.get(req) is None:
+                    raise ToolArgError(f"spawn_agent requires {req}")
+            spawned = self.spawn_agent(
+                args["agent_id"], args["name"], args["role"], list(args["argv"]),
+                cwd=args.get("cwd"), target=args.get("target"),
+                direction=args.get("direction"),
+            )
+            # token (漏洩面の限定) と native pane_id (handle と取り違え回避) は MCP 応答に
+            # 載せない。dispatcher MCP client には handle (`id`) のみ返す。
+            result = {k: v for k, v in spawned.items()
+                      if k not in ("token", "pane_id")}
+        elif name == "set_pane_identity":
+            target = args.get("target")
+            if target is None:
+                raise ToolArgError("set_pane_identity requires target")
+            result = self.set_pane_identity(
+                target, name=args.get("name"), role=args.get("role")
+            )
         else:
             return {
                 "content": [{"type": "text", "text": f"[unknown_tool] {name}"}],
@@ -748,9 +1415,12 @@ class _McpHandler(BaseHTTPRequestHandler):
                 session_id=session_id,
             )
         elif method == "tools/list":
+            # role tier で公開面をフィルタ (worker/curator には pane 操作を出さない)。
+            # 不変の auth_role で判定する (set_pane_identity の表示 role 変更で動かない)。
             self._send_json(
                 200,
-                {"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}},
+                {"jsonrpc": "2.0", "id": req_id,
+                 "result": {"tools": tools_for_role(bind.auth_role)}},
             )
         elif method == "tools/call":
             params = req.get("params") or {}

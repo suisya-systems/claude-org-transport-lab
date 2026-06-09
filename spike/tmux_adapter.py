@@ -36,7 +36,28 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 
-from terminal_adapter import NUDGE_TEXT, PaneRef  # noqa: F401  (NUDGE_TEXT 再利用)
+from terminal_adapter import (  # noqa: F401  (NUDGE_TEXT 再利用)
+    NUDGE_TEXT,
+    PaneRef,
+    normalize_key,
+)
+
+# 正規キー名 → tmux send-keys のキー名。Ctrl+<A-Z> は別途 `C-<x>` に写す。
+_TMUX_KEY = {
+    "Enter": "Enter", "Tab": "Tab", "Shift+Tab": "BTab", "Esc": "Escape",
+    "Backspace": "BSpace", "Delete": "DC",
+    "Up": "Up", "Down": "Down", "Left": "Left", "Right": "Right",
+    "Home": "Home", "End": "End", "PageUp": "PageUp", "PageDown": "PageDown",
+    "Space": "Space",
+}
+
+
+def _tmux_key(key: str) -> str:
+    """正規キー名を tmux send-keys 引数へ。未知は ValueError。"""
+    norm = normalize_key(key)
+    if norm.startswith("Ctrl+"):
+        return "C-" + norm[5:].lower()
+    return _TMUX_KEY[norm]
 
 # 専用 socket 名: 既存 tmux サーバーと分離する (本体非干渉)。
 SPIKE_SOCKET = "claude-org-spike"
@@ -217,6 +238,54 @@ class TmuxAdapter:
     def kill_server(self) -> None:
         """専用 socket のサーバーごと落とす (全 spike session の一括後始末)。"""
         self._tmux("kill-server", check=False)
+
+    # ----------------------------------------------------- Phase 4 full backend
+    def split(
+        self,
+        target: str,
+        argv: list[str],
+        cwd: str | None = None,
+        direction: str = "vertical",
+    ) -> PaneRef:
+        """既存 pane (`target`) を分割して新 pane に argv を起動する。
+
+        renga の direction 慣習 (§ pane-layout.md「split direction 慣習」) に揃える:
+        - `vertical`  = 左右分割 (既存=左 / 新=右) → tmux `split-window -h`
+        - `horizontal`= 上下分割 (既存=上 / 新=下) → tmux `split-window -v`
+        balanced split の target / direction は broker が geometry から決める
+        (claude_org_runtime.choose_split)。本メソッドはその指示を素直に実行する。
+        """
+        flag = "-h" if direction == "vertical" else "-v"
+        cmd_str = " ".join(shlex.quote(a) for a in argv)
+        args = [
+            "split-window", flag, "-t", str(target), "-d",
+            "-P", "-F", "#{pane_id}\t#{window_id}\t#{session_name}",
+        ]
+        if cwd:
+            args += ["-c", cwd]
+        args += [cmd_str]
+        proc = self._tmux(*args)
+        pane_id, window_id, _sess = proc.stdout.strip().split("\t")
+        return PaneRef(pane_id=pane_id, window_id=window_id, tab_id=window_id)
+
+    def send_keys(
+        self,
+        pane_id: str,
+        text: str | None = None,
+        keys: list[str] | None = None,
+        enter: bool = False,
+    ) -> None:
+        """raw PTY 入力 (Set D Surface 1.9)。tmux send-keys の一級語彙へ写す。
+
+        text (literal) → keys[] (キー名語彙) → enter (CR 追加) の順で送る。
+        未知キー名は ValueError (broker 側で invalid-params に変換される)。
+        """
+        if text:
+            self._tmux("send-keys", "-t", str(pane_id), "-l", "--", text)
+        for k in keys or []:
+            self._tmux("send-keys", "-t", str(pane_id), _tmux_key(k))
+        if enter:
+            self._tmux("send-keys", "-t", str(pane_id), "Enter")
 
 
 if __name__ == "__main__":

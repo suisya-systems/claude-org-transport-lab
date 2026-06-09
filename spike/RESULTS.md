@@ -244,3 +244,117 @@ Phase 1（WezTerm / Windows）と Phase 2（tmux / POSIX）の AC 判定を記�
     `wait_nudge` を「過去に nudge があるか」から baseline 件数増加待ちに強化（同一 pane 2 通目以降の
     再発火退行を検出）+ 両者の決定的回帰テスト（pre-fix で空配達を再現確認）。
   - 窓口判断によりレビューは round 4 を最終ラウンドとして打ち止め（フォーク spike・完了基準は全 green 達成済み）。
+
+---
+
+## Phase 4（ペイン操作移行 / full backend adapter / Issue #4）
+
+- 実施日: 2026-06-10
+- 環境: WSL2（Linux 6.6）/ Python 3.12（claude-org-ja `.venv`）/ tmux 実機あり / 検証モデル: Opus
+- 検証方式: **B（broker queue 統合ハーネス / 無課金・決定的・CI 可）を主**とし、窓口経由の
+  人間判断（2026-06-10）で **実 tmux smoke** を追加。SoT [§7.4](../docs/design/renga-decoupling.md) の
+  「該当 backend 実機で 1 サイクル完走」要件を、本 Linux/WSL2 環境では WezTerm 実機不可のため
+  **正準 backend の tmux に読み替え**（Phase 2 の tmux 実機 AC 前例に沿う。WezTerm 実機 AC は follow-up）。
+- 判定スクリプト: `python run_ac4.py`（GO/NO-GO + `broker-state/ac4/result.json`。`--no-real-tmux` で
+  FakeAdapter のみ）。CI 常設: [`tests/test_broker_phase4.py`](../tests/test_broker_phase4.py)
+  （FakeAdapter 5 検証 + 権限分離 / poll_events 境界 / send_keys 検証の単体、計 15 ケース green。
+  実 tmux smoke は sandbox の unix socket 制約のため CI から除外）。
+- 事前 codex design review 1 周（Blocker 1 / Major 5 / Minor 3）を実装前に全反映
+  （[`spike/phase4-design-note.md`](./phase4-design-note.md)）。最重要は **balanced split の現行同等性**:
+  現行 renga の split SoT は `claude_org_runtime.dispatcher.runner.choose_split`（doc prose は runtime と
+  drift 済み: `_ROLE_PRIORITY` dispatcher=4・`SECRETARY_MIN_WIDTH=120`）であり、**broker は choose_split を
+  再利用**して「現行同等」を再実装ではなく同一関数で構造的に保証した。
+
+### 実装差分
+
+- [`broker.py`](./broker.py): **role-scoped tool 公開**（messaging tier=worker/curator / ops tier=
+  dispatcher/secretary。`tools/list` フィルタ + `call_tool` の `[tool_forbidden]` 二重遮断）。
+  **ペイン操作 6 面**（`spawn_agent` / `close_pane` / `list_panes`(geometry) / `inspect_pane` /
+  `send_keys` / `poll_events`）+ `set_pane_identity`（Surface 1.8 継承）を MCP surface に追加。
+  **poll_events 合成**（list_panes 差分から `pane_started`/`pane_exited`/`events_dropped` を単一 lock 下で
+  exactly-once 合成、`_known_panes` を record map にして exit 後も name/role/agent_id を payload に保持、
+  初回 since=None は baseline、ring trim は count 付き `events_dropped`）。native pane id ↔ broker handle
+  対応（MCP 面は handle で話し native を露出しない）。balanced split は `choose_split` 再利用。
+- [`terminal_adapter.py`](./terminal_adapter.py): `TerminalAdapter` Protocol に `split` / `send_keys` を追加。
+  `SEND_KEYS_VOCAB` / `normalize_key`（Set D §1.9 キー語彙の backend 横断正準）。
+- [`tmux_adapter.py`](./tmux_adapter.py) / [`wezterm_adapter.py`](./wezterm_adapter.py): `split`
+  （tmux `split-window -h/-v` / WezTerm `split-pane --horizontal`）・`send_keys`（tmux 一級キー名 /
+  WezTerm 制御コード）を実装。WezTerm 側は Windows 専用のため本環境では parity 実装。
+
+### AC-4: ペイン操作 6 面 + 監視 1 サイクル完走 — **総合 GO**
+
+| # | 項目 | 判定 | 根拠 |
+|---|---|---|---|
+| AC-4-surface | 6 面 + identity が ops tier で往復、worker は構造的遮断 | **GO** | dispatcher token で 6 面往復。worker token では pane 操作が `tools/list` に出ず（4 面のみ）、`call_tool` も `[tool_forbidden]`。`spawn_agent` の MCP 応答に token 非露出（漏洩面限定）。未知キーは `[invalid-params]` |
+| AC-4-events | poll_events 合成（baseline / 取りこぼし回復 / events_dropped count / meta） | **GO** | 初回 since=None は履歴 replay 無し。baseline→spawn→since 付き poll で `pane_started`（name/role/agent_id/handle 付き）観測。**broker 非経由の直 kill 取りこぼしが list_panes reconcile で `pane_exited` 回復**（meta 保持）。ring trim で count 付き `events_dropped` |
+| AC-4-split | balanced split が現行同等 + capacity 検出 | **GO** | `claude_org_runtime.choose_split` 再利用。geometry 正規化（`left/top`↔`x/y`・`active`↔`focused`）後の判定が SoT と一致。候補空で `[split_capacity_exceeded]`（spawn 中止 = escalate 相当） |
+| AC-4-cycle | delegate→spawn→監視→完了報告→CLOSE_PANE→retro 完走 | **GO** | delegate(secretary→dispatcher) → spawn_agent(balanced) → 監視(`inspect_pane` で承認待ち=input_pending / stall=連続 busy を**自己申告に依らず独立観測**) → 完了報告(token 由来 from) → CLOSE_PANE(`close_pane` で token revoke + `pane_exited`) → retro gate の 1 サイクルが renga 不使用で完走 |
+| AC-4-cadence | 3 分 cadence の取りこぼし回復 | **GO** | worker クラッシュ（broker 非経由・イベント直接喪失）が次 cadence の list_panes reconcile で `pane_exited` 回復し、`reap_exited_panes` で token も revoke（監視ループの正しさを損なわない） |
+| AC-4-real-tmux | 実 tmux で 6 面往復（無課金 smoke） | **GO** | 実 tmux で spawn / split / list_panes(geometry) / send_keys / inspect / poll_events(`pane_started`+`pane_exited`) / close を `cat` プロセスで往復実証（Claude 不要・無課金） |
+
+## 総合判定（Phase 4 / pane control）
+
+- **AC-4: 全 6 項目 GO**（surface / events / split / cycle / cadence / real-tmux）。**完了基準達成**:
+  backend のみ（renga 不使用）で delegate → spawn → 監視（stall 検出 / 承認待ち観測）→ 完了報告 →
+  CLOSE_PANE → retro の 1 委譲サイクルが AC harness で完走。poll_events ポーリング合成の取りこぼしが
+  list_panes reconcile で回復し dispatcher 監視ループ（3 分 cadence）の正しさを損なわない。balanced split が
+  backend geometry で現行（renga）と同等（`choose_split` 再利用で構造的保証）。dispatcher 向け broker MCP
+  最小 surface を確定（worker/curator 非公開の権限分離）。無課金・決定的・CI 可・prose 非破壊の規律を維持。
+
+### codex セルフレビュー（full 検証深度）
+
+- **実装前 design review 1 周**（Blocker 1 / Major 5 / Minor 3）: 着手前に全反映（balanced split を
+  `choose_split` 再利用に切替、poll_events 合成の lock/payload/baseline/events_dropped 詰め、tool_forbidden
+  wire 形状・role 信頼境界の明記）。詳細は [`phase4-design-note.md`](./phase4-design-note.md)。
+- **commit 後 self-review round 1**（Blocker 2 / Major 5 / Minor 1 / Nit 1）: 全 Blocker / Major を修正
+  コミットで解消。
+  - **Blocker**: (1) `set_pane_identity` の可変 `role` でのツール権限昇格 → **不変 `auth_role`**（issue_token
+    確定）を権限 tier の唯一の根拠にし、表示 `role` と分離。(2) `spawn_agent` に token→worker の接続経路が
+    無い → **token 先発行 + per-agent `--mcp-config`（0600）を起動 argv に注入**（§4.6 段階 1）+ split 失敗時
+    revoke。
+  - **Major**: pane_exited 合成時に token 未 revoke → **pane_exited で即時 revoke**（保留集合経由、§4.4）/
+    native id を MCP payload に露出（handle 取り違え）→ **handle のみ露出**（list_panes / events / spawn 応答
+    から native 除去）/ pane exit 時の handle 未掃除（native 再利用で stale）→ **exit で handle 対応を掃除** /
+    split 失敗 `[io_error]` が adapter 例外文字列（将来 token-bearing argv）を素通し → **サニタイズ**（journal
+    のみ）/ poll_events が `_lock` 保持で `list_panes` I/O → **I/O を `_lock` 外**へ（`_reconcile_lock` で
+    合成を直列化、exactly-once 維持）。
+  - **exactly-once の整理（Major への回答）**: Set D §3.1 の exactly-once は「イベント **emit** が close/crash
+    ごとに 1 回」であり（`_diff_emit_locked` が単一 lock + `_reconcile_lock` 直列化で担保。回帰テストで反復
+    reconcile でも pane_exited が 1 回を確認）、「1 reader へ 1 回 deliver」ではない。`poll_events` は renga と
+    同型の **replayable な cursor 読み出し**（caller が next_since で前進）であり、cursor モデルとして正しい。
+  - 回帰テスト追加（`tests/test_broker_phase4.py`）: 権限昇格不可 / crash→token revoke /
+    config 注入 + split 例外時 revoke + 例外サニタイズ / payload に native id 非露出 / emit 1 回。
+- **self-review round 2**（Major 2）: `close_pane` の MCP 応答が native `pane_id` を返していた → handle のみに /
+  `spawn_agent` の `agent_id` が config ファイル名に無検証（path traversal で state_dir 外へ token 入り config）
+  → `is_filename_safe([A-Za-z0-9_-])` で発行・書込み前に `[name_invalid]`。
+- **self-review round 3**（Major 1 / Minor 2）: `spawn_agent` が同一 active `agent_id`/`name` の二重 spawn を許し
+  inbox（agent_id 単位 queue）共有で message 横取り → `[name_in_use]` 拒否 / `close_pane` が pane 残存でも
+  ok:true → pane_exists 確認で残存時 ok:false / `is_filename_safe` の `str.isalnum()` が Unicode 英数字を通す
+  → ASCII 明示集合。
+- **self-review round 4 / 最終**（Major 1）: 二重 spawn 拒否が check-then-act で並行 spawn race が残存 →
+  **重複判定 + 予約を `issue_token(reject_if_active=True)` の単一ロック下に閉じ**、ThreadingHTTPServer 配下の
+  並行二重発行を構造的に断つ（並行 12 スレッド発射で発行 1 回・有効 bind 1 本の決定的回帰テスト追加）。
+  窓口判断により round 4 を絶対最終ラウンドとして打ち止め。残 Minor 1 件（`close_pane` は adapter 不通時に
+  close 意図を尊重して ok:true ＝ 既存 `close_pane` 内部 API の「生存判定不能を退役扱いしない」方針と統一）は
+  設計上の許容として残置（PR 既知制限に明記）。
+- 収束: round1(Blocker2/Major5) → round2(0/2) → round3(0/1) → round4(0/1、修正済) → **Blocker/Major 残 0**。
+  回帰テスト計 25 ケース green。
+
+### 既知制限（Phase 4）
+
+- **WezTerm 実機 AC は未実施（follow-up: Issue #9）**: 本環境は Linux/WSL2 のため WezTerm 実機不可。正準
+  backend の tmux で実機 smoke を通した（人間判断で承認）。WezTerm の `split` / `send_keys` は parity 実装に
+  留まり、Windows 環境での実機検証は別途 follow-up（Issue #9）。
+- **実 tmux smoke は CI 非常設**: sandbox の unix socket 制約のため CI（`unittest discover`）からは除外。
+  CI は FakeAdapter の決定的 15 ケースで常設化し、実 tmux smoke は `run_ac4.py` の手動ランナーで実証。
+- **方式 B の合成役割**: 4 役割は実 Claude セッションではなく token bind された合成役割。pane 操作・
+  geometry・poll_events 合成・権限分離は本物だが、実 Claude TUI 往復の実在性は Phase 1/2 AC で既証。
+- **prose 書き換え（分類 (a)）・契約改訂（Set D Surface 1/3/4・Surface 8 案）は未実施**: 設計書 §7.4 が
+  「本体取り込み時の同時変更」と位置付ける作業であり、ja 不可触制約（Epic #6 完動ゲート前）により本フォーク
+  では行わない。本 Phase の成果物は broker 側の能力実証に閉じる。
+- **balanced split の runtime 依存**: `choose_split` は `claude_org_runtime`（pyproject 既存依存）を lazy
+  import する。未導入環境では `spawn_agent` の balanced split が失敗する（messaging 面は影響なし）。
+- **`close_pane` の adapter 不通時の成否（codex round 4 残 Minor、設計上許容）**: kill 後に `pane_exists` が
+  例外（adapter 不通）になるケースは、生存判定不能のため close 意図を尊重して ok:true を返す。これは既存
+  `close_pane` 内部 API の「生存判定不能を退役扱いしない」方針と統一した挙動であり、adapter 健全時は pane 残存を
+  ok:false で正しく弾く。adapter 不通という別事象は `poll_events` の reconcile が回復経路を持つ。
