@@ -22,10 +22,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from broker import Broker  # noqa: E402
-from wezterm_adapter import (  # noqa: E402
+from terminal_adapter import (  # noqa: E402
     PaneRef,
-    WezTermAdapter,
     classify_pane_state,
+    make_adapter,
 )
 
 sys.stdout.reconfigure(encoding="utf-8")
@@ -60,8 +60,9 @@ class StartupObservation:
 class SpikeSession:
     """1 本の検証セッション: broker 起動 → Claude TUI spawn → 観測。"""
 
-    def __init__(self, state_dir: Path, model: str = "sonnet"):
-        self.adapter = WezTermAdapter()
+    def __init__(self, state_dir: Path, model: str = "sonnet", backend: str | None = None):
+        self.adapter = make_adapter(backend)
+        self.backend = backend
         self.broker = Broker(state_dir=state_dir, adapter=self.adapter)
         self.model = model
         self.pane: PaneRef | None = None
@@ -82,7 +83,11 @@ class SpikeSession:
         self.broker.register_local(self.observer_token)
 
     def spawn_claude(self) -> None:
-        """中立 scratch dir で対話型 Claude TUI を WezTerm 新規ウィンドウに spawn。"""
+        """中立 scratch dir で対話型 Claude TUI を spawn (backend 非依存)。
+
+        backend 差は adapter.spawn が吸収する: WezTerm は新規ウィンドウ、
+        tmux は専用 socket 上の新規 detached session に spawn する。
+        """
         assert self.token is None, "already spawned"
         self.scratch = Path(tempfile.mkdtemp(prefix="broker-spike-"))
         self.token = self.broker.issue_token(AGENT_ID, AGENT_ID, "worker")
@@ -168,9 +173,9 @@ class SpikeSession:
         return classify_pane_state(self.screen())
 
     def type_text(self, text: str) -> None:
-        """入力欄へ paste (送信しない)。"""
+        """入力欄へ置く (送信しない)。bracketed paste で複数行も submit に化けない。"""
         assert self.pane is not None
-        self.adapter.send_text(self.pane.pane_id, text, no_paste=False)
+        self.adapter.type_text(self.pane.pane_id, text)
 
     def submit(self) -> None:
         assert self.pane is not None
@@ -187,9 +192,11 @@ class SpikeSession:
 
         実測 (claude 2.1.168): Esc は入力をクリアしない (rewind 系 UI)。
         Ctrl+C 1 打で入力欄クリアになる (2 連打は exit なので 1 回のみ)。
+        backend 差は adapter.send_interrupt が吸収する (WezTerm=生キー ETX /
+        tmux=send-keys C-c)。
         """
         assert self.pane is not None
-        self.adapter.send_text(self.pane.pane_id, "\x03", no_paste=True)
+        self.adapter.send_interrupt(self.pane.pane_id)
 
     def wait_state(self, want: str, timeout: float = 60.0, interval: float = 1.0) -> bool:
         deadline = time.monotonic() + timeout

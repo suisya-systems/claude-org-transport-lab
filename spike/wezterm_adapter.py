@@ -23,10 +23,17 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 
-WEZTERM_DEFAULT_EXE = r"C:\Program Files\WezTerm\wezterm.exe"
+# 共有基盤から再エクスポート (既存 import 経路 `from wezterm_adapter import ...`
+# を壊さないため)。NUDGE_TEXT / PaneRef / classify_pane_state / wait_for_state は
+# backend 非依存で terminal_adapter に集約した (Phase 2)。
+from terminal_adapter import (  # noqa: F401
+    NUDGE_TEXT,
+    PaneRef,
+    classify_pane_state,
+    wait_for_state,
+)
 
-# ナッジ定型 1 行 (docs/design/renga-decoupling.md §4.3)。本文は PTY を通さない。
-NUDGE_TEXT = "📨 新着あり。check_messages を実行"
+WEZTERM_DEFAULT_EXE = r"C:\Program Files\WezTerm\wezterm.exe"
 
 
 def find_wezterm() -> str:
@@ -39,15 +46,6 @@ def find_wezterm() -> str:
     raise FileNotFoundError(
         "wezterm not found in PATH nor at " + WEZTERM_DEFAULT_EXE
     )
-
-
-@dataclass
-class PaneRef:
-    """spawn した pane の追跡情報。毎回 --pane-id を明示するために保持する。"""
-
-    pane_id: int
-    tab_id: int | None = None
-    window_id: int | None = None
 
 
 @dataclass
@@ -128,6 +126,16 @@ class WezTermAdapter:
         """Enter 1 打。承認プロンプトの機械承認等に使う (確定事項 (1))。"""
         self.send_text(pane_id, "\r", no_paste=True)
 
+    # ---- intent 面 (TerminalAdapter Protocol、backend 横断で harness が使う) ----
+    def type_text(self, pane_id: int, text: str) -> None:
+        """未送信で入力欄に置く (submit しない)。bracketed paste で複数行の
+        改行も paste 内改行として扱い、行ごとの submit に化けさせない。"""
+        self.send_text(pane_id, text, no_paste=False)
+
+    def send_interrupt(self, pane_id: int) -> None:
+        """Ctrl+C 1 打 (入力欄クリア)。WezTerm では生キー入力で ETX を送る。"""
+        self.send_text(pane_id, "\x03", no_paste=True)
+
     def send_line(self, pane_id: int, text: str, settle: float = 0.15) -> None:
         """1 行送出 + Enter。ナッジ注入の正準形 (本文は通さない)。
 
@@ -153,66 +161,6 @@ class WezTermAdapter:
         self._cli("kill-pane", "--pane-id", str(pane_id), check=False)
 
 
-# ---------------------------------------------------------------------------
-# 画面状態ヒューリスティック (AC-1 自動判定の根拠)
-# ---------------------------------------------------------------------------
-
-# Claude Code TUI が応答生成中に表示する割り込みヒント (busy 判定はこの
-# 文字列のみで行う。スピナーグリフは点滅で取りこぼすため判定に使わない)
-_BUSY_MARKERS = ("esc to interrupt", "ctrl+c to stop", "esc to cancel")
-
-
-def classify_pane_state(screen: str) -> str:
-    """get-text の画面テキストから受信側状態を分類する。
-
-    返り値: "busy" | "input_pending" | "idle" | "unknown"
-
-    実測較正 (claude 2.1.168 / WezTerm 20240203):
-    - idle 時の入力プロンプトは水平罫線に挟まれた "❯ " 行
-      (旧バージョンの "│ > │" 枠形式もフォールバックで残す)。
-    - 応答生成中は画面下部に "(esc to interrupt)" 等のヒントが出る。
-
-    限界 (spike/manual-ime-test.md にも明記): get-text は PTY 内の文字 grid
-    のみを観測する。IME の変換窓・候補 UI は OS 側のオーバーレイであり
-    ここからは観測できない。よって IME 変換中の判定は自動化対象外。
-    """
-    lines = [ln.rstrip() for ln in screen.splitlines()]
-    # 1) busy: 応答生成中ヒントが画面下部にある
-    tail = "\n".join(lines[-20:]).lower()
-    if any(m in tail for m in _BUSY_MARKERS):
-        return "busy"
-
-    # 2) 入力プロンプト行を下から探す ("❯ ..." / "│ > ... │" / "> ...")
-    prompt_content: str | None = None
-    for ln in reversed(lines):
-        s = ln.strip()
-        if s.startswith("❯"):
-            prompt_content = s[1:].strip()
-            break
-        if s.startswith("│") and s.endswith("│") and len(s) > 2:
-            inner = s[1:-1].strip()
-            if inner.startswith(">"):
-                prompt_content = inner[1:].strip()
-                break
-
-    if prompt_content is None:
-        return "unknown"
-    if prompt_content:
-        return "input_pending"
-    return "idle"
-
-
-def wait_for_state(
-    adapter: WezTermAdapter,
-    pane_id: int,
-    want: str,
-    timeout: float = 30.0,
-    interval: float = 1.0,
-) -> bool:
-    """pane が目的状態になるまで poll。到達で True。"""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if classify_pane_state(adapter.get_text(pane_id)) == want:
-            return True
-        time.sleep(interval)
-    return False
+# 画面状態ヒューリスティック (classify_pane_state / wait_for_state) は
+# backend 非依存のため terminal_adapter に移動し、本モジュールの先頭で
+# 再エクスポートしている (Phase 2)。

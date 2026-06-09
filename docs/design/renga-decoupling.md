@@ -193,21 +193,55 @@ dev-channel prompt の消滅により、現行 spawn-flow の 3-3b（Enter 承�
 
 adapter は「messaging adapter（Phase 3 が要求する最小能力）」と「full backend adapter（Phase 4 が要求する全能力）」の **2 段階で別物として定義**する。「adapter で何でも差し替え可能」という主張はしない — バックエンドごとに能力差があり、差は下表のとおり埋まらないものもある。
 
-| 能力 | renga | WezTerm（`wezterm cli`） | tmux（将来・参考） | 要求フェーズ |
+> **Phase 2 更新（2026-06-08〜09）**: tmux を第二 backend として実装（[`spike/tmux_adapter.py`](../../spike/tmux_adapter.py)）し、WezTerm 用 AC-1 / AC-2 ハーネスを backend パラメータ化（[`spike/terminal_adapter.py`](../../spike/terminal_adapter.py) に共有面を集約）。**POSIX（tmux 3.4 / WSL2）と Windows（WezTerm）の両 backend で AC-1（自動 3 状態）/ AC-2（接続チェーン）が green**（[`spike/RESULTS.md`](../../spike/RESULTS.md) の Phase 2 節）。これにより tmux 列は「将来・参考」から **実装済み・実測値** に格上げした。下表の tmux 列は Phase 2 の実測に基づく。
+
+#### 4.7.1 backend 横断の能力比較（全能力）
+
+| 能力 | renga | WezTerm（`wezterm cli`） | tmux（`tmux`、Phase 2 実装） | 要求フェーズ |
 |---|---|---|---|---|
-| pane への send-text（ナッジ注入） | ○ `send_keys` | ○ `send-text` | ○ `send-keys` | **Phase 3（messaging）** |
-| pane 識別の安定名管理 | ○（name/role をサーバー管理） | △（pane id のみ。name↔id 対応表を adapter が保持） | △（同左） | **Phase 3（messaging）** |
-| split spawn（cwd / command 指定） | ○ | ○ `split-pane` | ○ `split-window` | Phase 4 |
-| geometry 付き list_panes（cell 単位 rect） | ○ | ○ `list --format json`（rows/cols/位置） | ○ `list-panes -F`（pane_left/top/width/height） | Phase 4 |
-| grid scrape（`inspect_pane` 相当） | ○ | ○ `get-text` | ○ `capture-pane` | Phase 4 |
-| cursor 位置付き scrape | ○（`include_cursor`） | △（`get-text` 単体では不可。別途取得・要検証） | △（`display-message -p '#{cursor_x}'` 併用） | Phase 4 |
-| cursor 付き poll_events（lifecycle イベント） | ○（long-poll + next_since） | ✕ **ネイティブのイベントストリームなし** → adapter が list ポーリングから `pane_started` / `pane_exited` を**合成**（粒度・遅延は劣化） | △（hooks で部分対応） | Phase 4 |
-| single-tab addressing（Set D §4.2 MUST） | ○（サーバーが強制） | △（tab 概念あり。adapter がスコープ強制を実装） | △（window 単位で同様） | Phase 4 |
+| pane への send-text（ナッジ注入） | ○ `send_keys` | ○ `send-text`（既定 bracketed paste） | ○ `send-keys`（一級プリミティブ） | **Phase 3（messaging）** |
+| 制御打鍵モデル（Enter / Ctrl-C 等） | ○（高レベル API） | △ `send-text --no-paste` + `CR` / ETX（paste 既定のため小細工要） | ○ `send-keys Enter` / `C-c` / `-l`（小細工不要。Phase 2 実測） | **Phase 3（messaging）** |
+| grid scrape（静止確認 defer の状態判定） | ○ | ○ `get-text` | ○ `capture-pane -p`（Phase 2 実測） | **Phase 3（messaging）** |
+| pane 識別の安定名管理 | ○（name/role をサーバー管理） | △（pane id のみ。name↔id 対応表を adapter が保持） | △（pane id `%N`。同左を adapter が保持） | **Phase 3（messaging）** |
+| headless / GUI 非依存運用 | ○ | △（GUI 非必須。mux-server のみで spawn 可。Phase 1 実測） | ○（detached session で標準動作。display 不要。Phase 2 実測） | 運用前提 |
+| split spawn（cwd / command 指定） | ○ | ○ `split-pane` | ○ `split-window` / `new-session`（spike は new-session で検証） | Phase 4 |
+| geometry 付き list_panes（cell 単位 rect） | ○ | ○ `list --format json`（rows/cols/位置） | ○ `list-panes -F`（`#{pane_left/top/width/height}`。Phase 2 実測） | Phase 4 |
+| grid scrape（`inspect_pane` 相当） | ○ | ○ `get-text` | ○ `capture-pane`（Phase 2 実測） | Phase 4 |
+| cursor 位置付き scrape | ○（`include_cursor`） | △（`get-text` 単体では不可。別途取得・要検証） | ○（`list-panes -F` の `#{cursor_x/y}` を同一呼出で取得。Phase 2 実測。WezTerm より優位） | Phase 4 |
+| cursor 付き poll_events（lifecycle イベント） | ○（long-poll + next_since） | ✕ **ネイティブのイベントストリームなし** → adapter が list ポーリングから `pane_started` / `pane_exited` を**合成**（粒度・遅延は劣化） | △（`pane-died` 等の hooks で部分対応。spike は WezTerm と同じく list ポーリング合成。hooks 併用で改善余地あり） | Phase 4 |
+| single-tab addressing（Set D §4.2 MUST） | ○（サーバーが強制） | △（tab 概念あり。adapter がスコープ強制を実装） | △（session / window 単位で同様。adapter がスコープ強制） | Phase 4 |
 | IME-safe caret（hardware cursor 制御） | ○ | ✕ | ✕ | **対象外**（人間入力端末は renga 継続の根拠） |
 
-- **messaging adapter**（Phase 3）: 要求能力は「send-text + pane 識別」のみ。renga / WezTerm / tmux いずれも満たせるため、メッセージング移行は backend 非依存にできる見込みが高い。
-- **full backend adapter**(Phase 4): `poll_events` の合成（WezTerm）はイベント粒度・遅延の劣化を伴う。Set D §3.1 が cursor-loss を best-effort + `list_panes` reconcile で許容している（Q9）ため、**ポーリング合成でも契約違反にはならない**が、dispatcher 監視ループの実効遅延が renga 比で増える。Phase 4 の取り込み判断（[§7.4](#74-phase-4-ペイン操作移行full-backend-adapter)）で実測する。
-- WezTerm 常駐が新たな前提になる（依存の付け替え側面）。ただし adapter 境界があるため tmux 等への二次移行は安価、と整理する。
+#### 4.7.2 adapter 2 段階の能力境界（messaging / full backend）
+
+「adapter で何でも差し替え可能」とは主張しない代わりに、**どの面が Phase 3 で要り、どの面が Phase 4 で要るか**を 2 表に分離して固定する。Phase 1 + Phase 2 のスパイクが実証したのは **messaging tier（+ 起動チェーン）のみ**であり、full backend tier の配線替え（spawn / inspect / poll_events）は Phase 4 スコープで未検証である。
+
+**(a) messaging adapter（Phase 3 が要求する最小面）** — Phase 1（WezTerm）+ Phase 2（tmux）で両 backend 実証済み:
+
+| 要求面 | WezTerm | tmux | 充足状況 |
+|---|---|---|---|
+| send-text（定型 1 行ナッジ注入） | ○ paste + `--no-paste` CR | ○ `send-keys -l` + `Enter` | 両 backend green（AC-1 / AC-2 roundtrip） |
+| grid scrape（静止確認 defer 用の idle/busy/input_pending 判定） | ○ `get-text` | ○ `capture-pane -p` | 両 backend green（AC-1 全状態 / `classify_pane_state` 共有） |
+| pane 識別（name↔id 対応） | △ adapter 保持 | △ adapter 保持 | adapter レイヤで充足 |
+| 起動チェーン（`--mcp-config` 注入 + 信頼確認の機械承認 + 登録検知） | ○ | ○ | 両 backend green（AC-2） |
+
+→ **結論**: messaging 移行に必要な面は **send-text + grid scrape + pane 識別 + 起動チェーン** に閉じ、renga / WezTerm / tmux いずれも充足。**メッセージング移行は backend 非依存**（Phase 1 + 2 で WezTerm / tmux 両実証）。
+
+**(b) full backend adapter（Phase 4 が要求する追加面）** — 本スパイク未検証（配線替えは Phase 4 スコープ）:
+
+| 要求面 | WezTerm | tmux | 差異・劣化 |
+|---|---|---|---|
+| split spawn（geometry 指定の balanced split） | ○ `split-pane` | ○ `split-window` | balanced split の現行同等性は Phase 4 で要実測（[§7.4](#74-phase-4-ペイン操作移行full-backend-adapter)） |
+| geometry 付き list_panes | ○ | ○（Phase 2 で形は実測） | 同等 |
+| grid scrape（`inspect_pane`） | ○ | ○ | 同等 |
+| cursor 付き scrape | △（別取得・要検証） | ○（`list-panes` 同梱） | **tmux 優位** |
+| poll_events（lifecycle、`pane_started`/`pane_exited`） | ✕ → ポーリング合成 | △ hooks + ポーリング合成 | 両者とも合成。Set D Q9 の best-effort + reconcile 許容内だが監視遅延が増える。tmux は hooks 併用の改善余地 |
+| single-tab addressing（MUST） | △ adapter 強制 | △ adapter 強制 | 同等 |
+
+→ **結論**: Phase 4 面は両 backend で概ね充足するが、**`poll_events` のポーリング合成の実効遅延**（dispatcher 監視ループの正しさ）と **balanced split の現行同等性**は未実測。Phase 4 の取り込み判断（[§7.4](#74-phase-4-ペイン操作移行full-backend-adapter)）で実測する。
+
+- **full backend adapter**(Phase 4): `poll_events` の合成は両 backend でイベント粒度・遅延の劣化を伴う。Set D §3.1 が cursor-loss を best-effort + `list_panes` reconcile で許容している（Q9）ため、**ポーリング合成でも契約違反にはならない**が、dispatcher 監視ループの実効遅延が renga 比で増える。
+- WezTerm / tmux いずれかの常駐が新たな前提になる（依存の付け替え側面）。**Phase 2 で tmux 第二実装を成立させたことにより「adapter 境界があるため二次移行は安価」という整理は机上ではなく実証になった**（同一ハーネス・同一 AC が backend パラメータ切替で両系 green）。POSIX 系は tmux、Windows 系は WezTerm を正準 backend とする運用が可能。
 
 ## 5. Contract Set D との整合（差分表）
 
@@ -301,7 +335,7 @@ adapter は「messaging adapter（Phase 3 が要求する最小能力）」と�
 | リスク | 整理 |
 |---|---|
 | ナッジ注入の混線 | 受信側が長文入力中だと renga のチャネル注入より一段劣る。静止確認 defer（[§4.3](#43-窓口への割り込み配達ナッジ最難関足切り対象)）で緩和するが、最終判定は Phase 1 の 4 状態 AC-1（[§7.1](#71-phase-1-スパイクwezterm--windows中止判断点)）。**壊れたら計画ごと中止** |
-| WezTerm 常駐の新前提化 | renga 依存を外す代わりに WezTerm（縮退先）+ broker デーモンが前提に加わる。adapter 境界により tmux 等への二次移行は安価、と整理する |
+| WezTerm 常駐の新前提化 | renga 依存を外す代わりに端末 backend（WezTerm / tmux）+ broker デーモンが前提に加わる。adapter 境界により二次移行は安価 — **Phase 2 で tmux 第二実装を成立させ、同一 AC が backend パラメータ切替で両系 green になることを実証**（[§4.7](#47-terminal-adapter-の境界と能力表)）。POSIX=tmux / Windows=WezTerm の使い分けが可能 |
 | イベント合成の劣化 | WezTerm にはネイティブの pane lifecycle イベントがなく、ポーリング合成になる（[§4.7](#47-terminal-adapter-の境界と能力表)）。Set D Q9 の best-effort 許容内だが、監視の実効遅延は増える |
 | broker の単一障害点化 | 現行 renga サーバーも同様の単一点だが、broker はデーモン管理（起動・再起動・queue store の復旧）という新しい運用責務を持ち込む。Phase 3 取り込み時に起動・死活の runbook を用意する |
 | token 漏洩 | env 経由の子プロセス漏洩が理論上ありうる。revoke-on-exit + TTL + localhost bind + role scope で被害面を限定（[§4.4](#44-per-agent-token-のライフサイクル)） |
@@ -310,9 +344,11 @@ adapter は「messaging adapter（Phase 3 が要求する最小能力）」と�
 
 - **dispatcher の決定的処理の Python 化**: 監視ループ等を broker 側 code に寄せる構想はあるが、本設計のスコープ外（一次入力で合意済み）。
 - **at-least-once 配達への強化**: Set D 2.3 の at-most-once drain を継承する（[§5](#5-contract-set-d-との整合差分表)）。broker queue store は永続化を持つため、将来 ack ベースの再配達に強化する余地はあるが、契約変更を伴うため本設計では扱わない。
-- **tmux adapter**: 能力表（[§4.7](#47-terminal-adapter-の境界と能力表)）に参考として載せたのみ。実装計画はない。
+- ~~**tmux adapter**: 能力表に参考として載せたのみ。実装計画はない。~~ → **Phase 2 で実装済み**（[`spike/tmux_adapter.py`](../../spike/tmux_adapter.py)、POSIX 正準 backend）。能力表（[§4.7](#47-terminal-adapter-の境界と能力表)）の tmux 列は実測値に更新済み。残るスコープ外は messaging / pane-control 以外の tmux 固有機能（copy-mode 連携等）であり、本設計の対象外。
 - **focus_pane / new_tab の broker 公開**: 初期 surface から除外（[§4.2](#42-broker-mcp-surface役割別公開面)）。人間向け補助が必要になった時点で追加を検討する。
 
 ## 改訂履歴
 
 - 2026-06-07: 初版（design only。renga-decoupling-design 委譲タスクの成果物）
+- 2026-06-08: Phase 1 スパイク（WezTerm / Windows）の AC-1 / AC-2 結果を反映（Phase 1 ゲート通過）。
+- 2026-06-09: Phase 2。tmux adapter（POSIX 正準 backend）を第二実装として追加し、ハーネスを backend パラメータ化。両 backend（tmux/WSL2・WezTerm/Windows）で AC-1 / AC-2 green。§4.7 の tmux 列を「参考」から実測値に格上げし、messaging（Phase 3）/ full backend（Phase 4）の能力境界を 2 表に分離（§4.7.2）。§8 リスク表・§9 スコープ外の tmux 記述を更新（Closes #2）。

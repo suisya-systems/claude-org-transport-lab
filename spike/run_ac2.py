@@ -7,7 +7,7 @@
   AC-2-2: per-agent token の受け渡し・認証が成立し、broker が from 帰属を
           token から正しく付与する。
   AC-2-3: broker の bind 表ベース登録検知が spawn 後 〜30 秒で成立する。
-  AC-2-4: Windows (ConPTY) での send-text に文字化け・取りこぼしがない。
+  AC-2-4: PTY (Windows=ConPTY / POSIX=pty) での send-text に文字化け・取りこぼしがない。
 
 結果は broker-state/ac2/result.json に保存し、RESULTS.md へ転記する。
 """
@@ -25,8 +25,9 @@ from harness import AGENT_ID, OBSERVER_ID, SpikeSession, log  # noqa: E402
 OUT = Path(__file__).parent / "broker-state" / "ac2"
 OUT.mkdir(parents=True, exist_ok=True)
 
-# ConPTY 文字化け検証用 (日本語 + 全角記号 + 半角カナ + 絵文字 + サロゲートペア)
-MOJIBAKE_PROBE = "日本語テスト：ConPTY経由①②③ｱｲｳ🎌𠮷"
+# PTY 文字化け検証用の UTF-8 ストレス文字列 (backend 非依存)。
+# 日本語 + 全角記号 + 半角カナ + 絵文字 + サロゲートペア (𠮷) を含む。
+MOJIBAKE_PROBE = "日本語テスト：PTY経由①②③ｱｲｳ🎌𠮷"
 
 results: dict[str, dict] = {}
 
@@ -36,8 +37,9 @@ def record(item: str, go: bool, detail: str) -> None:
     log(f"{'GO  ' if go else 'NO-GO'} {item}: {detail}")
 
 
-def main() -> int:
-    s = SpikeSession(state_dir=OUT / "state")
+def main(backend: str | None = None) -> int:
+    s = SpikeSession(state_dir=OUT / "state", backend=backend)
+    log(f"backend = {s.adapter.__class__.__name__}")
     s.start()
     s.spawn_claude()
     try:
@@ -66,7 +68,10 @@ def main() -> int:
         )
         record("AC-2-1", registered, f"MCP 接続 {'成立' if registered else '不成立'}。{prompt_note}")
 
-        # ---- AC-2-4: ConPTY send-text 文字化け検証 ------------------------
+        # ---- AC-2-4: PTY 文字化け検証 (Windows=ConPTY / POSIX=pty) ---------
+        # backend 横断の UTF-8 ラウンドトリップ検証。全角記号 / 半角カナ / 絵文字 /
+        # サロゲートペアが入力欄に無傷で出現するか (WezTerm=send-text paste /
+        # tmux=paste-buffer、いずれも文字単位で欠落・順序入替が無いこと)。
         s.type_text(MOJIBAKE_PROBE)
         time.sleep(1.5)
         scr = s.screen()
@@ -148,6 +153,7 @@ def finish(s: SpikeSession, code: int) -> int:
         json.dumps(
             {
                 "ran_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "backend": s.adapter.__class__.__name__,
                 "results": results,
                 "startup_observation": vars(s.obs),
                 "go": all(r["go"] for r in results.values()) and bool(results),
@@ -163,4 +169,12 @@ def finish(s: SpikeSession, code: int) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    import argparse
+
+    ap = argparse.ArgumentParser(description="AC-2 起動・接続チェーン検証 (backend 選択可)")
+    ap.add_argument(
+        "--backend", choices=("wezterm", "tmux"), default=None,
+        help="terminal backend (省略時は OS から自動: POSIX=tmux / Windows=wezterm)",
+    )
+    ns = ap.parse_args()
+    sys.exit(main(backend=ns.backend))
