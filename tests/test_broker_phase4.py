@@ -216,7 +216,9 @@ class SpawnInjectionTest(unittest.TestCase):
         self.c.teardown()
 
     def test_mcp_config_injected_with_token(self) -> None:
-        sp = self.c.broker.spawn_agent("worker-i", "worker-i", "worker", ["claude", "--x"])
+        # 課金中立 allowlist (AC-5) 適合の対話 flag を渡す (旧 ["claude","--x"] の intent= 追加 flag が
+        # 起動 argv へ渡ること を保持。--x はダミーで allowlist 非適合のため --model に置換)。
+        sp = self.c.broker.spawn_agent("worker-i", "worker-i", "worker", ["claude", "--model", "sonnet"])
         self.assertTrue(sp.get("ok"), sp)
         # token を先発行し pane に bind、per-agent の 0600 config を生成している
         self.assertIsNotNone(self.c.broker.get_bind(sp["token"]))

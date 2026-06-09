@@ -596,9 +596,9 @@ def check_billing(c: Cycle) -> tuple[bool, str]:
             f.append(f"{role}: --mcp-config の指す 0600 config が存在しない: {cfg_path}")
         c.broker.close_pane_target(sp["handle"])
 
-    # 課金中立の **構造強制**: token を注入する agent spawn は対話 claude TUI のみ。ヘッドレス /
-    # print 系 flag に加え、flag を持たない headless ラッパー (`python agent.py` 等) や 空 argv も
-    # 拒否する (caller 任せにしない。codex Blocker round 1/2 対応)。危険入力を実 API で弾けることを assert。
+    # 課金中立の **構造強制 (allowlist / default-deny)**: token 注入 spawn は対話 claude TUI の
+    # 正規 flag のみ許可し、headless 系・flag 無しラッパー・非 TUI サブコマンド・flag 後サブコマンド・
+    # `--`・未知 flag・値位置の headless flag・空 argv を一律拒否する (人間判断で allowlist 化を選択)。
     bad_cases = [
         (["claude", "-p", "x"], "[headless_forbidden]"),
         (["claude", "--print"], "[headless_forbidden]"),
@@ -609,6 +609,10 @@ def check_billing(c: Cycle) -> tuple[bool, str]:
         (["node", "agent.js"], "[headless_forbidden]"),
         (["claude", "mcp", "serve"], "[headless_forbidden]"),         # 非 TUI サブコマンド
         (["claude", "doctor"], "[headless_forbidden]"),
+        (["claude", "--strict-mcp-config", "mcp", "serve"], "[headless_forbidden]"),  # flag 後サブコマンド
+        (["claude", "--", "mcp", "serve"], "[headless_forbidden]"),   # `--` バイパス
+        (["claude", "--unknown-flag"], "[headless_forbidden]"),       # allowlist 外 flag
+        (["claude", "--model", "-p"], "[headless_forbidden]"),        # 値位置の headless flag (blacklist)
         ([], "[invalid-params]"),                                      # 空 argv
     ]
     for bad_argv, want in bad_cases:
@@ -617,6 +621,15 @@ def check_billing(c: Cycle) -> tuple[bool, str]:
             f.append(f"危険 argv {bad_argv} が {want} で拒否されない: {r}")
             if r.get("ok"):
                 c.broker.close_pane_target(r["handle"])
+
+    # allowlist 適合の対話 flag は許可される (false-reject が無いこと)。
+    for good_argv in (["claude", "--model", "sonnet", "--strict-mcp-config"],
+                      ["claude", "--allowedTools", "mcp__org-broker__send_message"]):
+        r = c.broker.spawn_agent("agent-ok", "agent-ok", "worker", good_argv)
+        if not r.get("ok"):
+            f.append(f"allowlist 適合 argv {good_argv} が誤って拒否された: {r}")
+        else:
+            c.broker.close_pane_target(r["handle"])
 
     go = not f
     detail = ("spawnable 各 role の spawn argv が 'claude --mcp-config <0600 path>' の対話 TUI で、"
