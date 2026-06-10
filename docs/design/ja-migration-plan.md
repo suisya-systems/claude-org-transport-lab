@@ -29,8 +29,8 @@
 **前提制約**（renga-decoupling.md §1 から継承。2026-06-11 に #2 撤回・#3 改訂を反映）:
 
 1. **課金制約（維持）**: 全エージェントは対話型 TUI セッション（ヘッドレス不可）。pure backend へ完全移行しても各エージェントは対話 TUI のまま broker MCP を consume する。
-2. **～~IME 制約~~（撤回、2026-06-11）**: 旧制約「人間が日本語入力する端末（窓口ペイン）は renga を継続使用」は**経験的に覆った**ため撤回された（renga-decoupling.md §1.2。スピナー自己再描画 × IME の backend parity スパイク [`spike/ime-parity/`](../../spike/ime-parity/) + 実 Claude 実走でユーザーが日本語 IME 無傷を確認 2026-06-11（描画層）、broker ナッジ × IME 変換中の手動 AC GO 2026-06-08（輸送層）。**IME 非阻害は確認済**）。→ **窓口を含む全ペインが pure backend で renga-free に運用できる**。「renga と broker は併存し窓口だけ renga 継続」という旧・最重要前提は破棄した。renga はもはや**必須前提ではなく opt-in fallback**（後述）。
-3. **採用方針 = 完全移行（renga は opt-in fallback、改訂）**: 輸送層だけでなく**人間入力を含む全ペインの端末 backend** を broker（tmux/WezTerm）へ移行し、**renga 無しで組織が起動・完結する**ことを既定とする。renga は「必須前提」から「**ユーザーが任意に選べる opt-in fallback**（故障時の縮退先 / renga を使いたい人向け）」へ降格。**renga の廃止が目的ではない**（コード・prose は残す・破壊最小・切戻し可）。これは「破壊的にしない opt-in 追加」を**逆向き**に適用したもの: 旧設計は「broker を opt-in 追加」だったが、完全移行後の最終形は「pure backend が既定・renga が opt-in」になる（移行の安全装置として切戻しは常に有効に残す。[§5.1](#51-backend-選択-flag) / [§5.5](#55-併存切戻しopt-in--rollback)）。
+2. **~~IME 制約~~（撤回、2026-06-11）**: 旧制約「人間が日本語入力する端末（窓口ペイン）は renga を継続使用」は**経験的に覆った**ため撤回された（renga-decoupling.md §1.2。スピナー自己再描画 × IME の backend parity スパイク [`spike/ime-parity/`](../../spike/ime-parity/) + 実 Claude 実走でユーザーが日本語 IME 無傷を確認 2026-06-11（描画層）、broker ナッジ × IME 変換中の手動 AC GO 2026-06-08（輸送層）。**IME 非阻害は確認済**）。→ **窓口を含む全ペインが pure backend で renga-free に運用できる**。「renga と broker は併存し窓口だけ renga 継続」という旧・最重要前提は破棄した。renga はもはや**必須前提ではなく opt-in fallback**（後述）。
+3. **採用方針 = 完全移行（renga は opt-in fallback、改訂）**: 輸送層だけでなく**人間入力を含む全ペインの端末 backend** を broker（tmux/WezTerm）へ移行し、**renga 無しで組織が起動・完結する**ことを既定とする。renga は「必須前提」から「**ユーザーが任意に選べる opt-in fallback**（pure backend が不調 / 未対応な環境の切戻し先・renga を使いたい人向け）」へ降格。**renga の廃止が目的ではない**（コード・prose は残す・破壊最小・切戻し可）。これは「破壊的にしない opt-in 追加」を**逆向き**に適用したもの: 旧設計は「broker を opt-in 追加」だったが、完全移行後の最終形は「pure backend が既定・renga が opt-in」になる（移行の安全装置として切戻しは常に有効に残す。[§5.1](#51-backend-選択-flag) / [§5.5](#55-併存切戻しopt-in--rollback)）。
 
 ---
 
@@ -114,7 +114,7 @@ drop-in 度を上げる＝ja 側の論理・retraining を最小化する、た�
 
 ### 3.4 重要結論 — 併存設計のため broker は別名（`org-broker`）を採り、FQ 名は書き換わる
 
-renga と broker は**併存しうる**（制約 2 撤回後も、制約 3 により renga は opt-in fallback として任意残置 = 故障時の縮退先・renga を使いたい人向け・移行期の切戻し先。完全移行後も renga 経路は削除しない）。MCP サーバーが同一マシン・同一セッションで両方見える状態になりうるため、**本設計では併存・切戻し安全性を優先して broker の MCP サーバー名を `renga-peers` と別の `org-broker` にする**（同名にすると同時登録時に衝突する）。理論上は per-session `--strict-mcp-config` で broker-only セッションに `renga-peers` 別名を切る余地もあるが、縮退運転（renga と broker の同居）と段階移行（messaging だけ broker 等）の安全性を取り、別名で固定する。したがって完全修飾ツール名は `mcp__renga-peers__send_message` → `mcp__org-broker__send_message` のように**プレフィックスが書き換わる**。
+renga と broker は**併存しうる**（制約 2 撤回後も、制約 3 により renga は opt-in fallback として任意残置 = pure backend が不調 / 未対応な環境の切戻し先・renga を使いたい人向け・移行期の切戻し先。完全移行後も renga 経路は削除しない）。MCP サーバーが同一マシン・同一セッションで両方見える状態になりうるため、**本設計では併存・切戻し安全性を優先して broker の MCP サーバー名を `renga-peers` と別の `org-broker` にする**（同名にすると同時登録時に衝突する）。理論上は per-session `--strict-mcp-config` で broker-only セッションに `renga-peers` 別名を切る余地もあるが、縮退運転（renga と broker の同居）と段階移行（messaging だけ broker 等）の安全性を取り、別名で固定する。したがって完全修飾ツール名は `mcp__renga-peers__send_message` → `mcp__org-broker__send_message` のように**プレフィックスが書き換わる**。
 
 帰結:
 - **「drop-in 互換」が成立するのは引数形・セマンティクスのレベル**（ja の論理・retraining を最小化）であって、**prose 中のリテラル FQ 名と allowlist 文字列は機械的に書き換わる**（renga-decoupling.md の分類 (a)/(b)）。
@@ -139,9 +139,9 @@ claude_org_runtime/
 ├── terminal/                 # ★新規 (spike/ から移設)
 │   ├── base.py               #   TerminalAdapter Protocol / PaneRef / PaneId
 │   │                         #   / classify_pane_state / SEND_KEYS_VOCAB / normalize_key / make_adapter
-│   ├── tmux.py               #   TmuxAdapter   (POSIX 正準)
-│   ├── wezterm.py            #   WezTermAdapter (Windows 正準)
-│   └── renga.py              #   ★RengaAdapter (新規。renga を backend として駆動。§4.5)
+│   ├── tmux.py               #   TmuxAdapter   (POSIX 正準。初期抽出対象)
+│   ├── wezterm.py            #   WezTermAdapter (Windows 正準。初期抽出対象)
+│   └── renga.py              #   (将来・任意) RengaAdapter。opt-in fallback 用。初期実装スコープ外 (§4.5)
 └── broker/                   # ★新規 (spike/ から移設)
     ├── server.py             #   Broker + _McpHandler (localhost HTTP MCP)
     ├── store.py              #   queue store (.state/broker/ subtree)
@@ -162,7 +162,7 @@ claude_org_runtime/
 | `broker.py` の TOOLS/tier 表 | `broker/surface.py` | §3.3 で renga 互換名に再編 |
 | `terminal_adapter.py` | `terminal/base.py` | Protocol + classify + key 語彙 |
 | `tmux_adapter.py` / `wezterm_adapter.py` | `terminal/tmux.py` / `wezterm.py` | そのまま |
-| （新規） | `terminal/renga.py` | renga を backend にする adapter（§4.5） |
+| （新規・**初期スコープ外**） | `terminal/renga.py` | renga を backend にする adapter。**opt-in fallback 用の任意オプションであり初期抽出（Issue A）には含めない**。必要時に別 Issue 化（§4.5） |
 | `tests/test_broker_*.py` | runtime のテストスイート | CI は runtime 側で常設化 |
 | `run_ac*.py` / `*-design-note.md` | フォークに残置（移植しない） | 検証アーティファクト。本体には持ち込まない |
 
@@ -184,7 +184,7 @@ ja (prose/skills/settings)  ──pin──▶  claude_org_runtime
 
 - **choose_split 再利用**: balanced split は再実装せず `dispatcher.runner.choose_split` を呼ぶ（Phase 4 で実証済の現行同等保証）。prose doc は runtime と drift 済のため移植しない。
 - **`.state/broker/` subtree**: 唯一の書き手は broker。state.db / 既存 journal とは subtree 単位で所有権を分離（Set C の inventory 追加改訂が必要 ＝ path/format/owner=broker/readers/migration を Set C に足す。renga-decoupling.md §4.5）。
-- **RengaAdapter（新規）の位置付け**: renga を「broker の一 backend」として駆動する adapter。これにより「broker 経路だが端末は renga」という構成（renga を opt-in fallback として broker 配下で使う = renga 故障切戻し / renga を使いたい人向けを adapter 差し替えで表現）が可能になる。**ただし制約 2 撤回により「窓口の IME のために renga が要る」という必然性は消えた**ため、これは必須経路ではなく**任意の互換オプション**である。実装優先度は低い（tmux/WezTerm で完動ゲート GO 済）。設計上の余地として置き、初期実装は tmux/WezTerm に限る。
+- **RengaAdapter（新規）の位置付け**: renga を「broker の一 backend」として駆動する adapter。これにより「broker 経路だが端末は renga」という構成（renga を opt-in fallback として broker 配下で使う = pure backend が不調 / 未対応な環境の切戻し / renga を使いたい人向けを adapter 差し替えで表現）が可能になる。**ただし制約 2 撤回により「窓口の IME のために renga が要る」という必然性は消えた**ため、これは必須経路ではなく**任意の互換オプション**である。実装優先度は低い（tmux/WezTerm で完動ゲート GO 済）。設計上の余地として置くだけで、**初期抽出（[§8 Issue A](#8-e-issue-分解案)）には含めず**、初期実装は tmux/WezTerm に限る。RengaAdapter が要るのは renga を broker 配下の backend として使いたい場合に限られ、必要になった時点で**別 Issue 化**する（初期スコープに renga 再導入を読ませない）。
 - **settings.generator**: allowlist 生成は既存 generator に flag-aware の分岐を足す（[§5.3](#53-allowlist-分類-b-生成を-flag-aware-にする)）。
 
 ### 4.6 daemon / CLI entry
@@ -236,7 +236,7 @@ ja の renga ツール参照は (i) **生成されるもの**（`tools/gen_deleg
 
 - **併存**: renga 経路のコード・prose を削除しない（**完全移行後も renga は opt-in fallback として任意残置**）。移行期は broker が加算、完全移行後は既定が broker・renga が opt-in に反転するが、いずれも renga 経路は生かしておく（切戻しの安全装置）。
 - **切戻し**: `transport=renga` への flag 戻しは「次に spawn される pane」を renga に向けるだけで、**実行中の broker-spawned ペインは即座には復帰しない**（`--mcp-config` / `--allowedTools` / pull 前提の prose を抱えたまま）。完全な切戻しの完了条件は次を含む: (1) flag 戻し、(2) **settings / 生成物の再生成**（renga allowlist へ）、(3) active な broker ペインの **suspend/resume または respawn**（renga 経路で再起動）、(4) **broker daemon の停止順序**（残ペインの revoke → daemon stop）、(5) **旧 token / queue store の破棄確認**（`.state/broker/` の未読・bind が残らないこと）。Phase ごとに切戻し可能な単位で取り込む（messaging → pane control）。
-- **段階導入**: renga-decoupling.md §7 の Phase 3（messaging）→ Phase 4（pane control）の順に、flag を**面単位で**段階適用できる設計が望ましい（例 messaging だけ broker・pane 操作は renga、の中間状態を許すか）。ただし帰属・配達の一貫性のため **messaging は all-or-nothing**（混在で from 帰属が割れる）。pane 操作は dispatcher/secretary に閉じるため、messaging 移行後に pane 操作を後追いする 2 段が安全。
+- **段階導入**: renga-decoupling.md §7 の Phase 3（messaging）→ Phase 4（pane control）の順に、flag を**面単位で**段階適用できる設計が望ましい（例 messaging だけ broker・pane 操作は renga、の中間状態を許すか）。ただし帰属・配達の一貫性のため **messaging は all-or-nothing**（混在で from 帰属が割れる）。pane 操作は dispatcher/secretary に閉じるため、messaging 移行後に pane 操作を後追いする 2 段が安全。**この中間状態は移行途中だけ許す「面単位の段階適用」であり、撤回された旧前提の「窓口だけ renga 継続」とは別物**（全ペインが同一 flag に従う前提は不変。最終形は全面 broker）。
 
 ### 5.6 向け替え規模（呼出主体別）
 
@@ -265,7 +265,7 @@ renga-decoupling.md §3.1 の棚卸しから、配線替え規模は次のとお
 
 **差分 reconcile を backend 横断の正準インフラとして維持する**。理由:
 
-1. **移植性が load-bearing**: broker の価値は backend 非依存（renga 故障時 WezTerm/tmux に縮退、POSIX=tmux / Windows=WezTerm）。WezTerm にネイティブ push が無い以上、差分 reconcile は**どの backend でも要る共通基盤**であり、これを正準から外せない。control mode を主軸にすると WezTerm 用に結局 reconcile を併存させ、二系統を抱える。
+1. **移植性が load-bearing**: broker の価値は backend 非依存（既定 = POSIX:tmux / Windows:WezTerm の pure backend + opt-in fallback の renga を同一 reconcile で扱える）。WezTerm にネイティブ push が無い以上、差分 reconcile は**どの backend でも要る共通基盤**であり、これを正準から外せない。control mode を主軸にすると WezTerm 用に結局 reconcile を併存させ、二系統を抱える。
 2. **Set D Q9 が best-effort + reconcile を許容済**: ポーリング合成は契約違反ではない。dispatcher 監視は 3 分 cadence で、reconcile の取りこぼし回復（Phase 4 AC-4-cadence GO）が正しさを担保する。**低遅延は現状の正しさ要件ではない**。
 3. **control mode は blast radius が大きい**: `-CC` は端末多重化の対話モデル全体に関与し（renga 併存下では特に）新しい故障面・実装重量を持ち込む。完動ゲート GO 済の reconcile を置き換えるリスクに見合わない。
 4. **accelerator は YAGNI まで defer**: tmux hooks ベースの低遅延補助は「**同じ event ring に流す任意経路**」として後から足せる（reconcile が正しさを担保するので accelerator 故障は degrade で済む）。3 分 cadence の監視遅延が実運用で不足と判明した時点で初めて着手する。Issue 分解では独立・低優先の spike 課題に置く（[§8](#8-e-issue-分解案) Issue F）。
@@ -292,7 +292,7 @@ prior-art 調査の結論（renga-decoupling.md 参考）どおり、本 backend
 | **D. ja 統合シーム** | flag + 生成系シーム + pin bump | `ORG_TRANSPORT` env flag（§5.1。**窓口含む全ペインが flag に従う** — 制約 2 撤回）/ **runtime に transport surface descriptor を新設**（§5.2 (i)）/ `settings.generator` + ja 側生成器（`gen_delegate_payload.py`・worker_brief）を descriptor 駆動に（§5.2 (i)・§5.3）/ runtime pin bump（§5.4）。**両生成器出力 == descriptor の golden test**。**この段の既定は renga・挙動不変**（既定の broker 反転は G ゲート後）。 | B, C | flag=renga で現行と bit 等価（切戻し忠実性）。flag=broker で全生成物が broker 面を指す（窓口含む）。golden test green。 |
 | **E. ja prose + 契約改訂** | 分類 (a) prose + 契約 | 受信モデル/spawn 儀式/エラー分岐の prose（§5.2 (ii)）。契約改訂: Set D Surface 1/2/3/4/5 + Surface 8（broker auth&delivery）+ non-goals §12（host-local 例外）。**Set C の `.state/broker/` 改訂は B に前倒し済**（E では `cwd`/`receive_mode`/`kind` の Set D 出力面 amendment と、永続 transport config を採る場合のみ Set C 追加を扱う）。 | D | 契約改訂 PR 批准。両系併記 prose がレビュー通過。 |
 | **F. event accelerator（任意・低優先）** | tmux hooks 低遅延補助 | 差分 reconcile を正準に据えたまま、同 event ring に tmux hooks を流す spike（[§6.3](#63-推奨--cただし-accelerator-は-defer)）。**3 分 cadence の遅延が実運用で不足と判明した時のみ着手**。 | B（独立） | hooks 経路の遅延改善を実測。reconcile 故障時 degrade を確認。 |
-| **G. ja dogfood（broker 有効化 → 既定反転）** | flag=broker で本番 ja を 1 サイクル + 既定反転判断 | messaging → pane control の段階適用（§5.5）。**全ペイン（窓口含む）が pure backend で renga-free に org-start し委譲サイクル完走**（新完動ゲート定義 = renga-decoupling.md §7.6）。課金中立 attestation（対話 TUI・実 argv）。**切戻しドリル（§5.5 の 5 完了条件: flag 戻し / 生成物再生成 / active ペイン respawn / daemon 停止順序 / token・queue 破棄確認）**。通過後に**既定を broker へ反転する人間判断**（§5.1）。 | E | flag=broker で窓口含む全ペイン renga-free に委譲サイクル完走 + 5 条件の切戻し確認 + 既定反転の Go 判断。WezTerm 実機 AC は既存 Issue #9。 |
+| **G. ja dogfood（broker 有効化 → 既定反転）** | flag=broker で本番 ja を 1 サイクル + 既定反転判断 | messaging → pane control の段階適用（§5.5）。**本番 ja 反映ゲート**: 本番 ja で**全ペイン（窓口含む）が pure backend で renga-free に org-start し委譲サイクル完走**すること（renga-decoupling.md §7.6 の完動ゲート定義を**本番 ja に適用**した段階。フォーク完動ゲート＝既 GO と区別し、本ゲートは本番反映の合格条件）。課金中立 attestation（対話 TUI・実 argv）。**切戻しドリル（§5.5 の 5 完了条件: flag 戻し / 生成物再生成 / active ペイン respawn / daemon 停止順序 / token・queue 破棄確認）**。通過後に**既定を broker へ反転する人間判断**（§5.1）。 | E | flag=broker で窓口含む全ペイン renga-free に委譲サイクル完走 + 5 条件の切戻し確認 + 既定反転の Go 判断。WezTerm 実機 AC は既存 Issue #9。 |
 
 **段階適用の指針**（§5.5）: messaging は all-or-nothing（D の messaging 面 → G messaging）。pane 操作は dispatcher/secretary に閉じるため後追い（D の pane 面 → G pane control）。各段で `transport=renga` 切戻しが効くことを完了基準に含める。
 
