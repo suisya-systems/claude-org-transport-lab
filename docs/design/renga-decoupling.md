@@ -118,7 +118,7 @@ Phase 2（棚卸し・契約整合）の先行実施として、リポジトリ�
 
 - 各エージェントは spawn 時に `--mcp-config` で broker の MCP サーバー（localhost HTTP）を注入され、per-agent token で認証される計画。
 - 送信者帰属（`from`）は broker が token から付与し、自己申告にしない（renga のサーバー帰属モデルの再現 = 偽装防止）。
-- ペイン操作（spawn / send-text / close / 画面取得 / イベント）は broker が adapter 経由で実行する。adapter は renga / WezTerm を差し替え可能にする。
+- ペイン操作（spawn / send-text / close / 画面取得 / イベント）は broker が adapter 経由で実行する。adapter は **tmux / WezTerm（pure backend 既定）を差し替え可能にし、renga は任意の opt-in fallback** として同じ adapter 境界で扱える。
 
 ### 4.2 broker MCP surface（役割別公開面）
 

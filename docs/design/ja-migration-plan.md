@@ -200,7 +200,7 @@ org-start が broker daemon を起動できるよう `broker/cli.py` に entry �
 
 ## 5. (c) ja 統合シーム最小化設計
 
-破壊的にしない opt-in 追加（Epic #6 制約）として、ja 側の改変を「**1 つの flag + 1 つの生成系シーム**」に集約する。
+破壊最小・切戻し可（Epic #6 制約）を保つため、ja 側の改変を「**1 つの flag + 1 つの生成系シーム**」に集約する（flag の既定値は移行期 renga → 完全移行後 broker に反転する。opt-in の向きの詳細は [§5.1](#51-backend-選択-flag)）。
 
 ### 5.1 backend 選択 flag
 
