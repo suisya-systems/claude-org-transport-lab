@@ -2,8 +2,9 @@
 
 > ステータス: **design only / 実装なし**。本リポジトリにこの設計の実装は一切存在しない。実験はフォークで行い、broker / adapter の実体は claude-org-runtime 側に置く計画である。
 > 本ドキュメントは「未実装の将来設計」であり、以下の記述はすべて**提案・計画**である（本体 = claude-org-runtime / ja への取り込みは未了）。現行動作（renga 経由）との対比は [§2「現状とこの設計の関係」](#2-現状とこの設計の関係) を参照。
+> **方針更新（2026-06-11、本ドキュメントの最重要前提変更）**: 旧 §1.2 確定制約 #2（「IME 制約により WezTerm 素は不成立、人間入力端末は renga 継続」）は、**経験的に覆った**ため**撤回**する（[§1.2](#1-背景と確定制約)）。出典は (i) スピナー自己再描画 × IME の backend parity スパイク（[`spike/ime-parity/`](../../spike/ime-parity/)、合成ハーネス tmux/WezTerm 両 backend GO + 実 Claude スピナー実走でユーザーが日本語 IME 無傷を確認、2026-06-11）と (ii) broker ナッジ注入 × IME 変換中の手動 AC（[`spike/RESULTS.md`](../../spike/RESULTS.md) AC-1 状態 2、`manual_ime_session.py`、GO 2026-06-08）の **描画層・輸送層の両面**である。これに伴い、本設計の前提は「輸送層だけ renga 非依存・窓口は renga 継続」という**中途半端な二重構造**から、**全ペイン（窓口を含む）が tmux / WezTerm の pure backend で renga-free に組織起動する完全移行**へ差し替わった。**renga は廃止しない** — 「組織が要求する必須前提」から「ユーザーが任意に選べる opt-in fallback（**pure backend が不調 / 未対応な環境の切戻し先・renga を使いたい人向け**）」へ降格する（既定 backend = tmux/WezTerm、破壊最小・切戻し可）。以下、本文中で旧前提に依拠していた記述は新前提へ更新済み。歴史的経緯としての旧制約は撤回の根拠提示のために残すが、**現行前提ではない**。
 > **フォーク実証ステータス（2026-06-10 最終化）**: 本設計のフォーク spike（[`spike/`](../../spike/)）は **Phase 1〜4 + 完動ゲート（Phase 5 / AC-5 / Issue #5）を全項目 GO** で完走した（[`spike/RESULTS.md`](../../spike/RESULTS.md)）。正準 backend は **tmux に確定**（本環境 Linux/WSL2 で実機実証。WezTerm 実機は follow-up Issue #9）。**Epic #6（Plan B / renga 依存解消）完動ゲート = GO**（フォーク側足切り通過、[§7.6](#76-完動ゲートphase-5--ac-5--epic-6-最終ゲート)）。本体取り込み（prose 書き換え・契約改訂・runtime 実装）は ja 不可触制約により別スコープ。
-> 一次入力: ユーザー・窓口間の設計合意ノート（2026-06-07、リポジトリ未コミットの運用ノート `notes/renga-decoupling-design-input-2026-06-07.md`）および Codex design review（同日、`tmp/` 配下の未コミットノート）。いずれも git 管理外のためこのブランチからは参照できないが、**そこで確定した制約・合意事項は [§1](#1-背景と確定制約本設計が覆さない前提) に本文として転記済み**であり、本設計書は単体で読める。本設計はこれらの確定制約を覆さない。
+> 一次入力: ユーザー・窓口間の設計合意ノート（2026-06-07、リポジトリ未コミットの運用ノート `notes/renga-decoupling-design-input-2026-06-07.md`）および Codex design review（同日、`tmp/` 配下の未コミットノート）。いずれも git 管理外のためこのブランチからは参照できないが、**そこで確定した制約・合意事項は [§1](#1-背景と確定制約) に本文として転記済み**であり、本設計書は単体で読める。本設計はこれらの確定制約を覆さない。
 > 依存ドキュメント（参照は本設計書 → 既存文書の一方向のみ。既存文書側から本設計書への参照追加は行わない）:
 > - [`docs/contracts/backend-interface-contract.md`](../contracts/backend-interface-contract.md)（Contract Set D、2026-05-03 批准。本設計の土台）
 > - [`docs/contracts/state-semantics-contract.md`](../contracts/state-semantics-contract.md)（Set F。state.db SoT の正準）
@@ -13,13 +14,18 @@
 
 ---
 
-## 1. 背景と確定制約（本設計が覆さない前提）
+## 1. 背景と確定制約
 
-以下 3 点はユーザー・窓口間で確定済みの制約であり、本設計はこの枠内で組み立てる。
+以下の制約のうち **#1（課金制約）は本設計が覆さない確定前提**として維持する。**#2（旧 IME 制約）は撤回**し、**#3（採用方針）は完全移行前提へ改訂**した（いずれも 2026-06-11、経験的根拠に基づく）。
 
-1. **課金制約 — ヘッドレス化は不成立**: 2026-06-15 から `claude -p` / Agent SDK の使用は対話利用と分離された「Agent SDK 月間クレジット」（Max 20x で $200/月）に計上され、超過分は API 従量課金になる（出典: code.claude.com/docs/en/headless、support.claude.com 記事 15036540）。本組織のワーカー使用量では確実に超過するため、**全エージェントは対話型 TUI セッションのまま**とする。エージェントを headless 化して renga 依存を消す案はこの時点で棄却済み。
-2. **IME 制約 — WezTerm 素のままは不成立**: 単一ペインでも Claude Code のスピナー描画（「✻ Cogitated...」等)が IME 変換窓のアンカーを奪う（ユーザー実測）。renga は hardware-cursor caret 制御でこの問題を解決している。よって**人間が日本語入力する端末（窓口ペイン）は renga を継続使用**する。「renga を排除して WezTerm 素に戻す」案もこの時点で棄却済み。
-3. **採用方針 = 案 B**: 組織の輸送層（メッセージング・spawn・観測）**だけ**を org-broker + terminal adapter で renga 非依存化し、renga は「組織が要求する必須前提」から「ユーザーの端末選択」に降格する計画。renga 故障時の縮退運転先が WezTerm バックエンド。**renga の排除が目的ではない**。
+1. **課金制約 — ヘッドレス化は不成立（維持）**: 2026-06-15 から `claude -p` / Agent SDK の使用は対話利用と分離された「Agent SDK 月間クレジット」（Max 20x で $200/月）に計上され、超過分は API 従量課金になる（出典: code.claude.com/docs/en/headless、support.claude.com 記事 15036540）。本組織のワーカー使用量では確実に超過するため、**全エージェントは対話型 TUI セッションのまま**とする。エージェントを headless 化して renga 依存を消す案はこの時点で棄却済み。**この制約は新前提でも不変**（pure backend へ完全移行しても、各エージェントは対話 TUI のまま broker MCP を consume する）。
+
+2. **~~IME 制約 — WezTerm 素のままは不成立~~（撤回、2026-06-11）**:
+   - **旧制約（歴史的経緯、現行前提ではない）**: 「単一ペインでも Claude Code のスピナー描画（『✻ Cogitating...』等)が IME 変換窓のアンカーを奪う（ユーザー実測）。renga は hardware-cursor caret 制御でこの問題を解決している。よって人間が日本語入力する端末（窓口ペイン）は renga を継続使用する」。この制約のもとでは「窓口だけ renga 継続・輸送層だけ broker 化」という二重構造が必然だった。
+   - **撤回の根拠（新事実 = IME 非阻害は確認済）**: この制約は**経験的に覆った**。(i) **描画層** — スピナー自己再描画 × IME の backend parity スパイク（[`spike/ime-parity/`](../../spike/ime-parity/)。`spinner_harness.py` が DECSC/DECRC 往復・絶対 CUP の同位置連続再描画を実 Claude 不要で生成。`--selftest` 全 PASS、tmux 素 / WezTerm 素の両 backend GO）に加え、**実 Claude のスピナー稼働中**でも tmux 素 / WezTerm 素の両方で日本語 IME が無傷であることを**ユーザーが実走で確認**（2026-06-11）。機構的根拠は [`spike/ime-parity/mechanism.md`](../../spike/ime-parity/mechanism.md)（tmux はホスト端末 = Windows Terminal の TSF レイヤに IME 描画を委譲するため、スピナーが揺らす grid カーソルと IME アンカーが層分離する。WezTerm 素も実測で無傷）。(ii) **輸送層** — broker のナッジ注入 × IME 変換中の手動 AC が GO（[`spike/RESULTS.md`](../../spike/RESULTS.md) AC-1 状態 2、`manual_ime_session.py`、Microsoft IME / Windows 11、2026-06-08。一過性の再描画ずれは復帰し、未確定文字列・確定文字列・未送信テキストはいずれも破壊されない）。
+   - **新前提（確定）**: **tmux / WezTerm の pure backend では、スピナー描画も broker ナッジ注入も日本語 IME を阻害しない**。したがって**人間が日本語入力する窓口ペインも renga なしで運用できる**。「窓口は renga 継続」という根拠は消滅した。renga の hardware-cursor caret は pure backend では不要な追加機構と位置付ける（[§4.7.1](#471-backend-横断の能力比較全能力) の IME-safe caret 行参照）。
+
+3. **採用方針 = 完全移行（renga は opt-in fallback として任意残置、改訂）**: 組織の輸送層（メッセージング・spawn・観測）**および人間入力を含む全ペインの端末 backend** を org-broker + terminal adapter（tmux / WezTerm）へ移行し、**renga 無しで組織が起動・完結する**ことを既定とする。renga は「組織が要求する必須前提」から「**ユーザーが任意に選べる opt-in fallback**」へ降格する: (a) 既定 backend = tmux（POSIX）/ WezTerm（Windows）の pure backend、(b) renga は **pure backend が不調 / 未対応な環境の切戻し先・renga を使いたい人向け**に**任意残置**（コード・prose は削除しない）、(c) 破壊最小・切戻し可（flag で renga 経路に戻せる）。**renga の廃止が目的ではない** — 必須でなくすだけである。旧方針（「輸送層だけ非依存・窓口は renga 継続」）の二重構造は本改訂で破棄した。
 
 進め方も合意済み: 配線替え（`mcp__renga-peers__*` → broker ツール）の薄い差分は**フォークで実験**し、成功したらフェーズ単位（メッセージング → ペイン操作）で本体に取り込む。broker デーモン + terminal adapter の実体コードは claude-org-runtime（既存の別パッケージ）または新規リポジトリに置き、本リポジトリには持ち込まない（[`docs/non-goals.md`](../non-goals.md) §6「PTY や端末多重化器の層を持たない」と整合）。dispatcher の決定的処理の Python 化は**本設計のスコープ外**（将来課題としてのみ記載、[§9](#9-スコープ外将来課題)）。
 
@@ -35,8 +41,8 @@
 | 送信者帰属 | renga サーバーが pane 由来で `from_id` / `from_name` を付与 | broker が **per-agent token** から付与する計画（自己申告にしない点は同じ） |
 | ペイン操作 | 全ロールが同一 MCP サーバーのツール群にアクセス可能（許可スキーマで絞る） | worker / curator にはメッセージング面のみ公開し、ペイン操作は broker 内部 + dispatcher / secretary 向け最小公開とする計画（[§4.2](#42-broker-mcp-surface役割別公開面)） |
 | エージェント接続 | spawn 時に `--dangerously-load-development-channels server:renga-peers` 注入 + 承認プロンプト | spawn 時に `--mcp-config` で broker MCP（localhost HTTP）を注入する計画（[§4.6](#46-起動フローの置き換え)） |
-| 端末バックエンド | renga 必須 | renga / WezTerm を adapter で差し替え可能にする計画（人間入力端末は renga 継続が既定） |
-| 人間の日本語入力 | renga の hardware-cursor caret 制御 | 変更なし（renga 継続。broker はこの層に関与しない） |
+| 端末バックエンド | renga 必須 | **既定 = tmux / WezTerm の pure backend（全ペイン renga-free）**。renga は opt-in fallback として任意残置（adapter で差し替え可能）。新前提（[§1.2 撤回](#1-背景と確定制約)） |
+| 人間の日本語入力 | renga の hardware-cursor caret 制御 | **pure backend で IME 非阻害**（スピナー描画・broker ナッジともに日本語 IME を壊さない。spike/ime-parity 2026-06-11 + AC-1 状態 2 2026-06-08 で経験的に確定）。renga の hardware-cursor caret は不要。renga 継続は任意 |
 
 ## 3. `mcp__renga-peers__*` 呼出箇所の棚卸し
 
@@ -90,11 +96,11 @@ Phase 2（棚卸し・契約整合）の先行実施として、リポジトリ�
 
 ```
                    （人間）
-                      │ 日本語入力は renga ペインで継続（IME 制約）
+                      │ 日本語入力も pure backend で完結（IME 非阻害。新前提 §1.2）
    ┌──────────────────┴───────────────────────────────┐
-   │ 端末バックエンド（renga ／ 縮退時 WezTerm。adapter で差し替え）│
+   │ 端末バックエンド（既定 = tmux / WezTerm。renga は opt-in fallback。adapter で差し替え）│
    │  ┌────────┐ ┌──────────┐ ┌────────┐ ┌────────┐  │
-   │  │secretary│ │dispatcher │ │curator │ │worker-*│  │
+   │  │secretary│ │dispatcher │ │curator │ │worker-*│  │  ← 窓口含む全ペインが renga-free
    │  └───┬────┘ └────┬─────┘ └───┬────┘ └───┬────┘  │
    └──────┼───────────┼───────────┼──────────┼───────┘
           │ MCP(HTTP, localhost only, per-agent token)
@@ -112,7 +118,7 @@ Phase 2（棚卸し・契約整合）の先行実施として、リポジトリ�
 
 - 各エージェントは spawn 時に `--mcp-config` で broker の MCP サーバー（localhost HTTP）を注入され、per-agent token で認証される計画。
 - 送信者帰属（`from`）は broker が token から付与し、自己申告にしない（renga のサーバー帰属モデルの再現 = 偽装防止）。
-- ペイン操作（spawn / send-text / close / 画面取得 / イベント）は broker が adapter 経由で実行する。adapter は renga / WezTerm を差し替え可能にする。
+- ペイン操作（spawn / send-text / close / 画面取得 / イベント）は broker が adapter 経由で実行する。adapter は **tmux / WezTerm（pure backend 既定）を差し替え可能にし、renga は任意の opt-in fallback** として同じ adapter 境界で扱える。
 
 ### 4.2 broker MCP surface（役割別公開面）
 
@@ -139,19 +145,19 @@ Phase 2（棚卸し・契約整合）の先行実施として、リポジトリ�
 - secretary の公開面は dispatcher とほぼ同一とする（org-start の dispatcher 起動、attention watcher の spawn/close、handover 経路の `send_keys` + `inspect_pane`、org-suspend の close/poll が現行運用で必要なため。[§3.1](#31-分類-a-運用上の呼出記述配線替え対象) の棚卸しに対応）。
 - renga の `focus_pane` / `new_tab` は人間向け補助であり（Set D でも非必須）、broker MCP の初期 surface からは**外す**提案とする。必要になった時点で追加する。
 
-### 4.3 窓口への割り込み配達（ナッジ。最難関・足切り対象）
+### 4.3 窓口への割り込み配達（ナッジ。旧・最難関 → 実証済み）
 
 MCP は要求応答型であり、対話中の Claude セッションへ push できない。renga のチャネル注入（in-band push）の代替として、以下の 2 段構えを提案する:
 
 1. **ナッジ**: broker が terminal adapter（WezTerm なら `wezterm cli send-text`）で宛先ペインに定型 1 行「📨 新着あり。check_messages を実行」+ Enter を打鍵する。
 2. **本文取得**: 受信側は broker の `check_messages` で本文を取得する。**本文は PTY を通らない**（長文・制御文字・マルチバイトの混線リスクをナッジ定型 1 行に閉じ込める）。
 
-設計上の緩和策（Phase 1 で実証する）:
+設計上の緩和策（Phase 1 で実証済み）:
 
 - **注入前の入力欄静止確認**: broker はナッジ打鍵の前に grid scrape で宛先ペインの入力欄が空（プロンプト静止）であることを確認し、空でなければ defer + 再試行する。これは現行の dispatcher handover 経路（`/clear` 後にプロンプト空を 1 秒間隔 poll してから次を打鍵する手順、`CLAUDE.md` 記載）と同型の既知テクニックである。
 - **ナッジの冪等性**: 配達は「未読あり」の通知であって本文ではないため、重複注入してもキュー消費は `check_messages` 側で一度きり。取りこぼし時は再ナッジで回復する。
 
-> **足切り条項**: この機構が Phase 1 スパイクの合格条件（[§7.1](#71-phase-1-スパイクwezterm--windows中止判断点)）を満たさない場合、**計画ごと棚上げする**。ナッジ配達は本設計全体の成立条件である。
+> **実証ステータス（旧・足切り条項の帰結、2026-06-11 更新）**: ナッジ配達は Phase 1 スパイクの合格条件（[§7.1](#71-phase-1-スパイク全ペイン-renga-free-起動の実証)）を **AC-1 全 4 状態 GO** で満たした（[`spike/RESULTS.md`](../../spike/RESULTS.md)。idle / IME 変換中 / 長文入力中 / 出力ストリーミング中のいずれでも窓口入力を壊さない。IME 変換中は手動 AC で 2026-06-08 GO）。**旧「未達なら計画ごと棚上げ」の足切り条項は、達成により解消した**。加えて旧前提（「renga が IME 安全な唯一の退避先なので、broker が IME を壊すと計画が死ぬ」）は §1.2 の制約撤回で消えており、**仮にナッジが特定環境で混線しても renga opt-in fallback が安全弁になるため、もはや計画全体の成立条件ではない**（個別環境の degrade を renga 任意残置で吸収する）。新しい完動ゲートの定義は [§7.6](#76-完動ゲートphase-5--ac-5--epic-6-最終ゲート) を参照。
 
 ### 4.4 per-agent token のライフサイクル
 
@@ -188,7 +194,7 @@ broker の書き込み領域は **`.state/broker/` 専用 subtree に限定**し
 | 4. 登録待ち | `list_peers` に worker が現れるまで 2 秒間隔リトライ（最大 30 秒） | **正規経路は現行と同型を維持**: worker 側 Claude の MCP クライアントが broker に接続（initialize handshake）した時点で broker が bind 表を「登録済み」に遷移させ、dispatcher は broker の `list_peers`（bind 表ベース）に worker が現れるまで現行 3-4 と同じ poll で待つ計画。補助として broker が `agent_ready` イベントを emit し、`poll_events` 派で待つ latency 改善経路も提供する（optional。正規の待ち方は `list_peers` poll であり、`agent_ready` に依存しない） |
 | 5. 指示送信 | `send_message(to_id="worker-{task_id}", ...)` — renga がチャネル注入 | `send_message` → broker queue store 投入 → ナッジ配達（worker は起動直後で入力欄が空のため、静止確認は即時通過する想定） → worker が `check_messages` で本文取得 |
 
-dev-channel prompt の消滅により、現行 spawn-flow の 3-3b（Enter 承認）と「承認しないと list_peers 待ちがタイムアウトする」結合が解消される見込みである一方、新たに「MCP サーバー接続の信頼確認」という未知数が入る。**段階 1・3・4 の置き換え成立（spawn → 接続 → 帰属 → 配達の一往復）は Phase 1 スパイクの合格条件 AC-2** とする（[§7.1](#71-phase-1-スパイクwezterm--windows中止判断点)）。3-3b / 3-4 相当の儀式を置き換えられないまま残る場合、Phase 2 以降に進まない。
+dev-channel prompt の消滅により、現行 spawn-flow の 3-3b（Enter 承認）と「承認しないと list_peers 待ちがタイムアウトする」結合が解消される見込みである一方、新たに「MCP サーバー接続の信頼確認」という未知数が入る。**段階 1・3・4 の置き換え成立（spawn → 接続 → 帰属 → 配達の一往復）は Phase 1 スパイクの合格条件 AC-2** とする（[§7.1](#71-phase-1-スパイク全ペイン-renga-free-起動の実証)）。3-3b / 3-4 相当の儀式を置き換えられないまま残る場合、Phase 2 以降に進まない。
 
 ### 4.7 terminal adapter の境界と能力表
 
@@ -211,7 +217,7 @@ adapter は「messaging adapter（Phase 3 が要求する最小能力）」と�
 | cursor 位置付き scrape | ○（`include_cursor`） | △（`get-text` 単体では不可。別途取得・要検証） | ○（`list-panes -F` の `#{cursor_x/y}` を同一呼出で取得。Phase 2 実測。WezTerm より優位） | Phase 4 |
 | cursor 付き poll_events（lifecycle イベント） | ○（long-poll + next_since） | ✕ **ネイティブのイベントストリームなし** → adapter が list ポーリングから `pane_started` / `pane_exited` を**合成**（粒度・遅延は劣化） | △（`pane-died` 等の hooks で部分対応。spike は WezTerm と同じく list ポーリング合成。hooks 併用で改善余地あり） | Phase 4 |
 | single-tab addressing（Set D §4.2 MUST） | ○（サーバーが強制） | △（tab 概念あり。adapter がスコープ強制を実装） | △（session / window 単位で同様。adapter がスコープ強制） | Phase 4 |
-| IME-safe caret（hardware cursor 制御） | ○ | ✕ | ✕ | **対象外**（人間入力端末は renga 継続の根拠） |
+| IME-safe caret（hardware cursor 制御） | ○ | ✕ | ✕ | **不要**（renga 固有の追加機構だが、pure backend = WezTerm 素 / tmux でもスピナー描画・ナッジ注入は IME を阻害しないことを経験的に確認したため必須ではない。旧「renga 継続の根拠」は撤回 → [§1.2](#1-背景と確定制約) / spike/ime-parity 2026-06-11） |
 
 #### 4.7.2 adapter 2 段階の能力境界（messaging / full backend）
 
@@ -257,7 +263,7 @@ adapter は「messaging adapter（Phase 3 が要求する最小能力）」と�
 | Surface 5: Authentication / channel（5.1–5.2） | **改訂提案** | 5.1 dev-channel injection（flag 注入 + `send_keys(enter)` 承認）を**廃止し、`--mcp-config` による broker MCP 注入 + per-agent token 認証に置き換える**提案。5.2「transport は backend の自由（MAY）」は継承 — localhost HTTP はこの MAY の範囲内だが、認証要件（token 必須）は新設のため新 Surface に置く |
 | Surface 6: Error code vocabulary（6.1–6.3） | **継承 + 新設** | `[<code>] <message>` 形式と最小語彙、ABI 安定性（6.2）、`backend_unreachable` 正規化（Q11、Issue #242）を継承。**新設コード**（6.2 の「MAY add」規定内）: `token_invalid` / `token_revoked` / `token_expired` / `nudge_failed`（静止確認リトライ枯渇）/ `adapter_unavailable`（broker は生きているが端末バックエンド側が不通 — `backend_unreachable`（broker 自体に到達不能）と区別する） |
 | Surface 7: Backwards-compatibility | **継承** | broker MCP surface にも SemVer 義務をそのまま適用する |
-| （新設）Surface 8 案: Broker auth & delivery | **新設** | per-agent token ライフサイクル（[§4.4](#44-per-agent-token-のライフサイクル)）、role-scoped ツール公開（[§4.2](#42-broker-mcp-surface役割別公開面)）、ナッジ配達契約（静止確認・冪等性・失敗時エスカレーション、[§4.3](#43-窓口への割り込み配達ナッジ最難関足切り対象)）、broker queue store の所有権（[§4.5](#45-broker-queue-storestatebroker-専用-subtree)。on-disk 面は **Set C の inventory 追加改訂と連動**させ、Set D 系統単独では閉じない）。Set D の追補 Surface とするか独立契約（Set G 等）とするかは契約改訂 PR の時点で判断する |
+| （新設）Surface 8 案: Broker auth & delivery | **新設** | per-agent token ライフサイクル（[§4.4](#44-per-agent-token-のライフサイクル)）、role-scoped ツール公開（[§4.2](#42-broker-mcp-surface役割別公開面)）、ナッジ配達契約（静止確認・冪等性・失敗時エスカレーション、[§4.3](#43-窓口への割り込み配達ナッジ旧最難関--実証済み)）、broker queue store の所有権（[§4.5](#45-broker-queue-storestatebroker-専用-subtree)。on-disk 面は **Set C の inventory 追加改訂と連動**させ、Set D 系統単独では閉じない）。Set D の追補 Surface とするか独立契約（Set G 等）とするかは契約改訂 PR の時点で判断する |
 
 特に注意すべき非互換（移行時に harness prose の書き換えが必要な点）:
 
@@ -268,20 +274,20 @@ adapter は「messaging adapter（Phase 3 が要求する最小能力）」と�
 ## 6. non-goals との関係
 
 - **[`docs/non-goals.md`](../non-goals.md) §12「MCP の HTTP 公開形式の外部統合は持たない」**: broker MCP は localhost HTTP（**host-local only**、127.0.0.1 bind + per-agent token 必須）であり、§12 が否定する「外部公開」（ブラウザ拡張・別マシン IDE からの接続、TLS / ネットワーク境界の問題）には該当しない。また §12 の代替手段節が認める「別途 MCP の HTTP サーバーを併設する設計も可能ですが、claude-org-ja 本体の責務外とします」と整合し、broker 実体を claude-org-runtime 側に置くことで「本体の責務外」を保つ。ただし §12 の理由節にある「`renga-peers`（ローカル標準入出力経由）に集約」「同一タブ内 P2P が通信モデルの正本」という記述は Phase 3 取り込み時に実態と乖離するため、**その時点で non-goals §12 の改訂（host-local 例外の明文化）を契約改訂 PR に含める**ことを提案する（本設計書からは提案のみ。規範文書は変更しない）。
-- **§6「PTY や端末多重化器の層を持たない」**: broker / adapter は PTY 注入・ペイン制御を含む Layer 3 相当の責務であり、本リポジトリには持ち込まない。実体は claude-org-runtime または新規リポジトリに置く（[§1](#1-背景と確定制約本設計が覆さない前提)）。
+- **§6「PTY や端末多重化器の層を持たない」**: broker / adapter は PTY 注入・ペイン制御を含む Layer 3 相当の責務であり、本リポジトリには持ち込まない。実体は claude-org-runtime または新規リポジトリに置く（[§1](#1-背景と確定制約)）。
 - **§5「複数プロバイダー切替はしない」**: broker は端末バックエンドの差し替えであり、エージェント（Claude Code）の差し替えではない。Claude 専用の立ち位置は変えない。
 
 ## 7. Phase 計画と移行完了判定基準
 
 各 Phase の「何を通せば移行完了か」を先置きで固定する。いずれもフォーク上で実証してから本体に取り込む。
 
-### 7.1 Phase 1: スパイク（WezTerm / Windows、中止判断点）
+### 7.1 Phase 1: スパイク（全ペイン renga-free 起動の実証）
 
 最小実証: 対話ペイン spawn → broker MCP 接続（`--mcp-config` 注入）→ token 帰属付きナッジ → `check_messages` の一往復。
 
-合格条件は AC-1（ナッジ 4 状態）と AC-2（接続チェーン）の **2 本立てで、両方の合格を Phase 2 以降へ進む条件**とする。
+合格条件は AC-1（ナッジ 4 状態）と AC-2（接続チェーン）の **2 本立てで、両方の合格を Phase 2 以降へ進む条件**とする。**両 AC とも GO 済**（[`spike/RESULTS.md`](../../spike/RESULTS.md)）。
 
-**AC-1 — ナッジ注入の 4 状態テスト（go/no-go、計画中止条項付き）**:
+**AC-1 — ナッジ注入の 4 状態テスト（go/no-go。旧・計画中止条項は GO により解消、2026-06-11）**:
 
 受信側（窓口役）ペインが以下の **4 状態それぞれにあるときにナッジを注入し、いずれの状態でも窓口の入力を壊さないこと**:
 
@@ -292,7 +298,8 @@ adapter は「messaging adapter（Phase 3 が要求する最小能力）」と�
 | 3 | **長文入力中**（未送信の複数行テキストが入力欄にある） | 入力中のテキストにナッジ文字列が混入しない。ユーザーの未送信テキストが勝手に送信されない |
 | 4 | **Claude 出力ストリーミング中**（スピナー / 応答生成中） | 出力の描画が乱れず、ナッジが応答完了後に正しく処理される（入力キューに滞留したまま消えない、を含む） |
 
-- 判定は**全 4 状態の合格が必須**。1 つでも「窓口入力を壊す」結果が再現可能に出た場合、緩和策（[§4.3](#43-窓口への割り込み配達ナッジ最難関足切り対象) の静止確認 defer 等）を尽くしても解消しなければ、**本計画ごと中止（棚上げ）する**。AC-1 のみが「計画中止」を導く足切り条項である。
+- 判定は**全 4 状態の合格が必須**であり、**全 4 状態 GO 済**（[`spike/RESULTS.md`](../../spike/RESULTS.md) AC-1。状態 2 = IME 変換中は `manual_ime_session.py` で 2026-06-08 手動 GO、状態 1/3/4 は自動 GO）。
+- **旧足切り条項の扱い（撤回・再定義、2026-06-11）**: 旧版では「1 つでも窓口入力を壊したら本計画ごと中止（棚上げ）。AC-1 のみが計画中止を導く足切り条項」としていた。この足切りは **(i) AC-1 が全状態 GO で達成されたこと**、および **(ii) その前提（「renga が IME 安全な唯一の退避先だから、broker が IME を壊すと計画が死ぬ」= §1.2 旧制約）が経験的に撤回されたこと**（pure backend でスピナー描画も IME を阻害しない、[§1.2](#1-背景と確定制約) / [`spike/ime-parity/`](../../spike/ime-parity/) 2026-06-11）の二点で**解消した**。今後は、仮に特定環境でナッジ混線が再発しても、それは「計画中止」ではなく **renga opt-in fallback で吸収する degrade** として扱う（renga は任意残置されているため）。本 Phase 1 AC は「計画存続の足切り」ではなく「**全ペイン（窓口を含む）が pure backend で renga-free に動作することの実証**」として読み替える。
 
 **AC-2 — 起動・接続チェーンの置き換え成立（Phase 2 以降へ進む前提条件）**:
 
@@ -336,7 +343,9 @@ adapter は「messaging adapter（Phase 3 が要求する最小能力）」と�
 
 ### 7.6 完動ゲート（Phase 5 / AC-5 / Epic #6 最終ゲート）
 
-> **完動ゲート（2026-06-10）= GO**: Phase 1〜4 で揃った broker + tmux/WezTerm adapter + ペイン操作6面/監視を前提に、フォーク組織が **backend(tmux)のみ・renga 不使用**で 委譲サイクルを**複数回**完走できることを dogfood で実証した（[`spike/RESULTS.md`](../../spike/RESULTS.md) の Phase 5 / AC-5 節、Closes #5）。検証方式は Phase 3/4 同様の **方式 B（FakeAdapter / 無課金・決定的・CI 可）を主**とし、実 tmux cat smoke + **実 Claude worker active 1 サイクル**（窓口経由で人間が token コストを承認）を実機証跡として追加した。
+> **完動ゲートの定義（2026-06-11 再定義）**: 新前提（[§1.2](#1-背景と確定制約) 制約撤回）に合わせ、Epic #6 の完動ゲートを次のとおり定義する: **全ペイン（窓口を含む）が tmux または WezTerm の pure backend で renga-free に org-start でき、委譲サイクルを完走する**こと。旧定義（「輸送層だけ renga 不使用・人間入力の窓口は renga 継続」）の二重構造前提は撤回した。この再定義は、(i) 既に GO 済の **renga-free 輸送 dogfood**（下記 AC-5。broker + tmux/WezTerm adapter で委譲サイクルを複数回完走）と、(ii) **IME 非阻害の経験的確定**（窓口の人間入力を pure backend で行ってもスピナー描画・ナッジ注入が日本語 IME を壊さない。[`spike/ime-parity/`](../../spike/ime-parity/) 2026-06-11 + AC-1 状態 2 2026-06-08）の合成で満たされる — IME こそが「窓口だけ renga に縛る」最後の根拠だったため、その撤回で全ペイン renga-free が完動ゲートの正式な合格条件になった。
+>
+> **完動ゲート（2026-06-10 / 輸送 dogfood）= GO**: Phase 1〜4 で揃った broker + tmux/WezTerm adapter + ペイン操作6面/監視を前提に、フォーク組織が **backend(tmux)のみ・renga 不使用**で 委譲サイクルを**複数回**完走できることを dogfood で実証した（[`spike/RESULTS.md`](../../spike/RESULTS.md) の Phase 5 / AC-5 節、Closes #5）。検証方式は Phase 3/4 同様の **方式 B（FakeAdapter / 無課金・決定的・CI 可）を主**とし、実 tmux cat smoke + **実 Claude worker active 1 サイクル**（窓口経由で人間が token コストを承認）を実機証跡として追加した。
 
 Issue #5 の完了基準 4 項目をすべて GO で満たした:
 
@@ -351,7 +360,7 @@ Issue #5 の完了基準 4 項目をすべて GO で満たした:
 
 | リスク | 整理 |
 |---|---|
-| ナッジ注入の混線 | 受信側が長文入力中だと renga のチャネル注入より一段劣る。静止確認 defer（[§4.3](#43-窓口への割り込み配達ナッジ最難関足切り対象)）で緩和するが、最終判定は Phase 1 の 4 状態 AC-1（[§7.1](#71-phase-1-スパイクwezterm--windows中止判断点)）。**壊れたら計画ごと中止** |
+| ナッジ注入の混線 | 受信側が長文入力中だと renga のチャネル注入より一段劣りうる。静止確認 defer（[§4.3](#43-窓口への割り込み配達ナッジ旧最難関--実証済み)）で緩和し、Phase 1 の 4 状態 AC-1（[§7.1](#71-phase-1-スパイク全ペイン-renga-free-起動の実証)）で**全状態 GO 済**（IME 変換中含む）。**旧「壊れたら計画ごと中止」は撤回**（§1.2 制約撤回 + AC-1 達成）。特定環境で混線が再発しても renga opt-in fallback で degrade を吸収する（計画は死なない） |
 | WezTerm 常駐の新前提化 | renga 依存を外す代わりに端末 backend（WezTerm / tmux）+ broker デーモンが前提に加わる。adapter 境界により二次移行は安価 — **Phase 2 で tmux 第二実装を成立させ、同一 AC が backend パラメータ切替で両系 green になることを実証**（[§4.7](#47-terminal-adapter-の境界と能力表)）。POSIX=tmux / Windows=WezTerm の使い分けが可能 |
 | イベント合成の劣化 | WezTerm にはネイティブの pane lifecycle イベントがなく、ポーリング合成になる（[§4.7](#47-terminal-adapter-の境界と能力表)）。Set D Q9 の best-effort 許容内だが、監視の実効遅延は増える |
 | broker の単一障害点化 | 現行 renga サーバーも同様の単一点だが、broker はデーモン管理（起動・再起動・queue store の復旧）という新しい運用責務を持ち込む。Phase 3 取り込み時に起動・死活の runbook を用意する |
@@ -377,3 +386,4 @@ Issue #5 の完了基準 4 項目をすべて GO で満たした:
 - 2026-06-10: Phase 4（ペイン操作移行 / full backend adapter）。検証方式 B（FakeAdapter / 無課金・決定的・CI 可）+ 実 tmux smoke（人間判断で承認、SoT §7.4 の WezTerm 実機要件を本 Linux/WSL2 環境では tmux に読み替え）で §7.4 の完了基準を **全項目 GO** で実証。`spike/run_ac4.py`（geometry / 生死 / 画面状態 / split / send_keys を駆動する Phase 4 用 FakeAdapter + 実 tmux smoke）+ CI 常設 `tests/test_broker_phase4.py`（15 ケース）を追加。`spike/broker.py` に **role-scoped tool 公開**（messaging / ops tier。`tools/list` フィルタ + `[tool_forbidden]` 二重遮断、§4.2）・**ペイン操作 6 面**（`spawn_agent` / `close_pane` / `list_panes` / `inspect_pane` / `send_keys` / `poll_events`）+ `set_pane_identity`・**poll_events 合成**（list_panes 差分から `pane_started`/`pane_exited`/`events_dropped` を単一 lock 下で exactly-once 合成、`_known_panes` record map で exit 後も meta 保持、初回 baseline、count 付き events_dropped）・native id ↔ broker handle 対応を追加。`terminal_adapter.py` に `split`/`send_keys` Protocol + `normalize_key`、`tmux_adapter.py`/`wezterm_adapter.py` に `split`/`send_keys` 実装。**balanced split は現行 split SoT の `claude_org_runtime.dispatcher.runner.choose_split` を再利用**して構造的に現行同等を保証（doc prose は runtime と drift 済みのため移植せず）。事前 codex design review 1 周（Blocker 1 / Major 5 / Minor 3）を実装前に全反映（[`spike/phase4-design-note.md`](../../spike/phase4-design-note.md)）。WezTerm 実機 AC・prose 書き換え（分類 (a)）・契約改訂（Surface 1/3/4・Surface 8 案）は本体取り込みスコープのため本フォークでは未実施（ja 不可触制約）。詳細は [`spike/RESULTS.md`](../../spike/RESULTS.md) の Phase 4 節（Closes #4）。
 - 2026-06-10: 次段（ja 移行方針）を別ノート [`docs/design/ja-migration-plan.md`](./ja-migration-plan.md) に design only で確定し、§10 に最小ポインタを追記（本書は完動ゲートで最終化済のため正本は当該ノート）。
 - 2026-06-10: **完動ゲート（Phase 5 / AC-5 / Epic #6 最終ゲート、Closes #5）= GO**。フォーク組織が backend(tmux)のみ・renga 不使用で 委譲サイクルを複数回完走できることを dogfood で実証（[§7.6](#76-完動ゲートphase-5--ac-5--epic-6-最終ゲート)）。検証方式 B（FakeAdapter / 無課金・決定的・CI 可）で AC-5 6 検証（multi 3 サイクル連続 + cross-cycle isolation / stall→escalation enqueue / escalation defer + 人間返答転送 at-most-once / handover ペイン保持 + 監視 cursor 不喪失 / resume suspend 全 revoke + 未読破棄 + stale 非継承 / billing argv 構造）を全項目 GO。実機証跡として 実 tmux cat smoke 2 サイクル + **実 Claude worker active 1 サイクル**（人間が token コスト承認、委託→実作業(2+2)→broker 経由完了報告(token 由来 from)→close/revoke 完走）を追加。課金中立は実 argv（ps）に headless/print 系 flag なし + 対話 TUI idle 描画で実測 attestation。`spike/run_ac5.py` + CI 常設 `tests/test_broker_dogfood.py`（FakeAdapter 6 検証 + headless flag guard）+ `spike/ac5-design-note.md`（実装前 codex design review 1 周 = Blocker 2 / Major 7 反映）を追加。正準 backend を tmux に確定。本体取り込み（prose 書き換え・契約改訂・runtime 実装）は ja 不可触制約により別スコープ。詳細は [`spike/RESULTS.md`](../../spike/RESULTS.md) の Phase 5 / AC-5 節。
+- 2026-06-11: **設計再導出（前提変更 / design only / Refs #6 #9）**。旧 §1.2 確定制約 #2（IME 制約により WezTerm 素は不成立・人間入力端末は renga 継続）を**経験的根拠で撤回**: (i) スピナー自己再描画 × IME の backend parity スパイク（[`spike/ime-parity/`](../../spike/ime-parity/) = `mechanism.md` 機構解明 + `spinner_harness.py` 再現ハーネス（`--selftest` 全 PASS・tmux/WezTerm 両 backend GO）+ `manual-ac-ime-parity.md` 手動 AC テンプレ）に加え、**実 Claude スピナー稼働中でも tmux 素 / WezTerm 素の両方で日本語 IME 無傷をユーザーが実走確認**（2026-06-11、描画層）、(ii) broker ナッジ × IME 変換中の手動 AC GO（AC-1 状態 2、`manual_ime_session.py`、2026-06-08、輸送層）。これにより方針を**完全移行**へ差し替え: 既定 backend = tmux/WezTerm の pure backend、**全ペイン（窓口含む）が renga-free に org-start**、renga は必須前提でなく **opt-in fallback として任意残置**（廃止しない・破壊最小・切戻し可）。本改訂で更新した節: §1（制約 #2 撤回・#3 完全移行へ改訂・status header 方針更新注記）、§2 比較表（端末 backend / 人間日本語入力行）、§4.1 全体像 diagram、§4.3（ナッジ足切り条項 → 実証済みへ）、§4.7.1（IME-safe caret 行 = 不要へ）、§7.1（AC-1 計画中止足切り条項の撤回・再定義、見出し変更）、§7.6（完動ゲートを「全ペイン renga-free org-start + 委譲サイクル完走」へ再定義）、§8 リスク表（ナッジ混線行）。**IME 非阻害は確認済として断定**。次段 ja 移行方針の完全移行前提化と既存 Issue 再スコープ推奨は [`docs/design/ja-migration-plan.md`](./ja-migration-plan.md) を正本とする。design-only: 実装・production ja・runtime 挙動・GitHub issue には一切触れていない。
