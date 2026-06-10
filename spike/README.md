@@ -24,8 +24,9 @@
 | `mcp_smoke_test.py` | MCP プロトコル層の合成クライアント検証 (Claude 不要・無課金、backend 非依存) |
 | `run_ac2.py` | AC-2 (起動・接続チェーン) 自動検証。`--backend {wezterm,tmux}` |
 | `run_ac1.py` | AC-1 のうち自動 3 状態 (idle / 長文入力中 / ストリーミング中) の自動判定。`--backend {wezterm,tmux}` |
-| `manual-ime-test.md` | AC-1 状態 2 (IME 変換中) の手動テスト手順書 |
+| `manual-ime-test.md` | AC-1 状態 2 (IME 変換中) の手動テスト手順書 (broker ナッジ注入の輸送層検証) |
 | `manual_ime_session.py` | 同手動テスト用の対話セッション起動スクリプト |
+| `ime-parity/` | **IME × スピナー backend parity スパイク** (ime-backend-parity-spike, Refs #6 #9)。tmux 素 vs WezTerm 素 で日本語 IME 入力 + Claude スピナー描画が共存するかを再検証。機構解明 md + スピナー再現ハーネス + 手動 AC テンプレ (4 状態 GO/NO-GO)。propose-only。詳細は [`ime-parity/README.md`](./ime-parity/README.md) |
 | `probe_startup.py` | TUI 描画採取用 probe (較正用・使い捨て) |
 | `RESULTS.md` | AC 判定結果の記録 (go/no-go)。Phase 1 (WezTerm) + Phase 2 (tmux) |
 | `broker-state/` | broker queue store + 画面ダンプ等の実行時生成物 (git 管理外) |
