@@ -140,7 +140,7 @@ class SpinnerHarness:
         sys.stdout.buffer.write(s.encode("utf-8"))
 
     def _wb(self, b: bytes) -> None:
-        """入力 raw byte をそのまま端末へ返す（端末側で UTF-8 を合成。decode しない）。"""
+        """バイト列を端末へ書く（完成した UTF-8 文字の再エンコード列。mojibake しない）。"""
         sys.stdout.buffer.write(b)
 
     def _flush(self) -> None:
@@ -166,7 +166,7 @@ class SpinnerHarness:
             f"== スピナー再現ハーネス ==  state={st}  cursor-mode={cm}  hz={self.args.hz}",
             "tmux / WezTerm 素 の両 backend で起動し、下の ❯ 入力欄に日本語を IME 変換しながら",
             "タイプして、スピナー再描画が変換窓のアンカーを奪うか目視判定してください。",
-            "  Ctrl+U: 入力欄クリア   Ctrl+C: 終了",
+            "  Ctrl+U: 入力欄クリア   Ctrl+C: 終了   （入力欄は 1 行モデル: Enter/折返しは無視）",
             "（手順と GO/NO-GO テンプレは manual-ac-ime-parity.md を参照）",
             "",
         ]
@@ -179,7 +179,7 @@ class SpinnerHarness:
         elif initial:
             # 非スピナー状態は state ごとに表示を変える（idle と long-input を区別する）
             if self.args.state == "long-input":
-                body = "(長文入力中 — スピナー停止・対照群: 下の ❯ に複数行の長い日本語を変換入力)"
+                body = "(長文入力中 — スピナー停止・対照群: 下の ❯ に端末幅に近い長い 1 行の日本語を変換入力)"
             else:
                 body = "(idle — スピナー停止・対照群)"
         else:
@@ -226,17 +226,24 @@ class SpinnerHarness:
             time.sleep(period)
 
     def _echo_byte(self, ch: bytes) -> None:
-        """通常入力バイト 1 つを raw エコーし、完成文字だけ幅追跡へ反映する（lock 下で呼ぶ）。
+        """入力バイト 1 つを食わせ、UTF-8 として完成した文字だけをエコー＋幅追跡する（lock 下で呼ぶ）。
 
-        raw byte をそのまま端末へ返す（端末が UTF-8 を合成）ため mojibake しない。
-        確定済み日本語（マルチバイト）も正しく入力欄に入る — 手動 AC の中心観点 (c)。
+        完成文字を UTF-8 へ再エンコードして書くので mojibake しない（確定済み日本語も正しく
+        入力欄に入る — 手動 AC の中心観点 (c)）。本ハーネスの入力欄は **単一行モデル**である:
+        改行・タブ等の制御文字は無視し、端末幅に達したら以降の文字を無視する。これにより
+        折返し・複数行による「実カーソル位置」と「追跡列 input_cells」の desync を構造的に防ぐ
+        （cup モードの復帰先・Backspace 消去位置が常に正しい単一行に閉じる）。長文の対照は
+        「端末幅に近い長い 1 行」で行う（複数行編集はこのハーネスの対象外）。
         """
-        self._wb(ch)
         for c in self._decoder.decode(ch):
-            if c in ("\r", "\n"):
+            if unicodedata.category(c).startswith("C"):  # 制御文字（改行/タブ等）は無視＝単一行を保つ
                 continue
+            w = cell_width(c)
+            if self.input_cells + w >= self.cols:        # 端末幅に達したら無視（折返し desync 防止）
+                continue
+            self._wb(c.encode("utf-8"))
             self.input_buf.append(c)
-            self.input_cells += cell_width(c)
+            self.input_cells += w
 
     # ---- 入力スレッド（POSIX raw mode）----
     def _read_input_posix(self) -> None:
@@ -352,6 +359,18 @@ def selftest() -> int:
     check("utf8 echo roundtrip (no mojibake)", b"".join(raw) == "日本ABc".encode("utf-8"))
     check("utf8 input buffer chars", h3.input_buf == ["日", "本", "A", "B", "c"])
     check("utf8 width tracked (CJK=2)", h3.input_cells == h3._base_cells + 2 + 2 + 1 + 1 + 1)
+    # 単一行モデル: 制御文字（改行/タブ）は無視され、追跡列・バッファが乱れないこと
+    cells_before = h3.input_cells
+    for byte in b"\r\n\t":
+        h3._echo_byte(bytes([byte]))
+    check("control bytes ignored (single-line)",
+          h3.input_buf == ["日", "本", "A", "B", "c"] and h3.input_cells == cells_before)
+    # 端末幅キャップ: cols を超える入力は無視され input_cells が cols 未満に閉じること
+    h4 = SpinnerHarness(argparse.Namespace(state="ime", cursor_mode="cup", hz=10,
+                                           no_input=True, duration=0), rows=24, cols=20)
+    for _ in range(40):
+        h4._echo_byte("あ".encode("utf-8"))
+    check("width cap keeps single line", h4.input_cells < h4.cols)
     print("\n自己診断:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 
