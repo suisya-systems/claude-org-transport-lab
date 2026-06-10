@@ -102,10 +102,11 @@ renga-decoupling.md §1.2 の**確定制約 #2**は次のとおり:
 ## 3. なぜ WezTerm 素は壊れうるか（grid カーソルと IME アンカーが同一プロセスで結合）
 
 WezTerm は **IME-aware な端末エミュレータ**であり、自分の grid カーソルセルに IME preedit/候補窓を**結合**している。
-一次情報の対応:
+情報の対応（[4][5][6] が一次＝公式 doc / 実 issue、[3] は二次＝解説 wiki）:
 
 - WezTerm は Windows で **IMM32**（`ImmSetCompositionWindow` / `ImmSetCandidateWindow`）を使い、
-  IME 候補/変換窓を**カーソル相対**に配置する（`set_ime_window_position`、Windows Integration ドキュメント [3]）。
+  IME 候補/変換窓を**カーソル相対**に配置する（`set_ime_window_position`。挙動の解説は DeepWiki [3]＝**二次情報**。
+  一次の裏付けは下記 `composition_status` [4] と issue #2569/#1922 [5][6]）。
 - `composition_status` は「**変換中にカーソル位置に表示されているのと同じ**未確定テキスト」を返す [4]。
   ＝ WezTerm は preedit を**カーソルセルにインライン描画**する設計。
 - 既知挙動: IME preedit 文字列が「**全ペインのカーソル位置に**描画される」（issue #2569 [5]）、
@@ -142,11 +143,11 @@ WezTerm は **IME-aware な端末エミュレータ**であり、自分の grid 
   バイト列だけが PTY → tmux に届く**。変換中は tmux には何も届かない（未確定文字列は PTY を通らない）。
   ＝ スピナーが grid カーソルを揺らしても、それは tmux の内部スクリーンモデルと、それを写す
   Windows Terminal の grid 再描画の話であって、**IME アンカーの所有者（WT の TSF レイヤ）とは層が分かれている**。
-- Windows Terminal は **TSF（Text Services Framework）**で IME を実装している（`src/tsf/`、
-  `TSFInputControl` が `TerminalControl` からカーソル位置とフォント情報を得て候補 `TextBlock` を描画し、
-  確定テキストをバッファに書く）[8][9]。歴史的に「IME UI がカーソルに追従しない」不具合（#459）も
-  PR #1919 で修正済み [9]。検索一次情報には「**この種の問題はネイティブ端末（Windows Terminal）では起きない**」
-  との整理もある [8]（ただし下記の留保を参照）。
+- Windows Terminal は **TSF（Text Services Framework）**で IME を実装している（ソースツリー `src/` 配下の
+  TSF 実装 [8]。`TSFInputControl` が `TerminalControl` からカーソル位置とフォント情報を得て候補を描画し、
+  確定テキストをバッファに書く）。歴史的に「IME UI がカーソルに追従しない」不具合（#459）も
+  **PR #1919 で修正済み [9]（一次）**。「ネイティブ端末では本種の問題が起きにくい」という整理も流布するが、
+  これは**二次情報**であり、下記の留保（VSCode #282621）どおり鵜呑みにしない。
 
 **tmux が壊れない可能性の機構（仮説、人間実走で確定）**:
 
@@ -213,21 +214,19 @@ renga は **hardware-cursor caret（システムキャレット）制御**で IM
 
 ---
 
-## 参考一次情報
+## 参考情報（一次／二次を明記）
 
-- [1] Microsoft Learn — *Status, Composition, and Candidates Windows*: <https://learn.microsoft.com/en-us/windows/win32/intl/status--composition--and-candidates-windows>
-- [2] Microsoft Learn — *Installing and Using Input Method Editors*（候補窓はテキストカーソル位置に置き、カーソルが動けば能動更新）: <https://learn.microsoft.com/en-us/windows/win32/dxtecharts/installing-and-using-input-method-editors>
-- [3] WezTerm — Windows Integration（`set_ime_window_position` / `ImmSetCandidateWindow` / `ImmSetCompositionWindow`）: <https://deepwiki.com/wezterm/wezterm/4.3-windows-integration>
-- [4] WezTerm — `window:composition_status()`（変換中にカーソル位置に出ている未確定テキストを返す）: <https://wezterm.org/config/lua/window/composition_status.html>
-- [5] WezTerm issue #2569 — IME preedit string が全ペインのカーソル位置に描画される: <https://github.com/wezterm/wezterm/issues/2569>
-- [6] WezTerm issue #1922 — Windows 中国語 IME 使用時にカーソルが文字で埋まる: <https://github.com/wezterm/wezterm/issues/1922>
-- [7] microsoft/vscode issue #282621 — 対話型 CLI ツール使用時に中国語 IME 変換テキストが端末右端に誤配置（`upstream`/`terminal-input`）: <https://github.com/microsoft/vscode/issues/282621>
-- [8] microsoft/terminal — Input Handling（TSF/`src/tsf/`、ネイティブ端末では本種の問題が起きないとの整理）: <https://instagit.com/microsoft/terminal/what-kind-of-input-handling-is-supported-by-windows-terminal/>
-- [9] microsoft/terminal PR #1919 — #459「IME UI does not follow the cursor in Windows Terminal」の修正: <https://github.com/microsoft/terminal/pull/1919>
-- `use_ime`（既定 false。変更後は再起動が必要）: <https://wezterm.org/config/lua/config/use_ime.html>
+- [1]（一次）Microsoft Learn — *Status, Composition, and Candidates Windows*: <https://learn.microsoft.com/en-us/windows/win32/intl/status--composition--and-candidates-windows>
+- [2]（一次）Microsoft Learn — *Installing and Using Input Method Editors*（候補窓はテキストカーソル位置に置き、カーソルが動けば能動更新）: <https://learn.microsoft.com/en-us/windows/win32/dxtecharts/installing-and-using-input-method-editors>
+- [3]（**二次・解説 wiki**。一次の裏付けは [4][5][6]）WezTerm — Windows Integration 解説（`set_ime_window_position` / `ImmSetCandidateWindow` / `ImmSetCompositionWindow` への言及）: <https://deepwiki.com/wezterm/wezterm/4.3-windows-integration>
+- [4]（一次・公式 doc）WezTerm — `window:composition_status()`（変換中にカーソル位置に出ている未確定テキストを返す）: <https://wezterm.org/config/lua/window/composition_status.html>
+- [5]（一次・実 issue）WezTerm issue #2569 — IME preedit string が全ペインのカーソル位置に描画される: <https://github.com/wezterm/wezterm/issues/2569>
+- [6]（一次・実 issue）WezTerm issue #1922 — Windows 中国語 IME 使用時にカーソルが文字で埋まる: <https://github.com/wezterm/wezterm/issues/1922>
+- [7]（一次・実 issue）microsoft/vscode issue #282621 — 対話型 CLI ツール使用時に中国語 IME 変換テキストが端末右端に誤配置（`upstream`/`terminal-input`）: <https://github.com/microsoft/vscode/issues/282621>
+- [8]（一次・ソースツリー）microsoft/terminal — TSF 実装（`TSFInputControl` 等を含む `src/` 配下）: <https://github.com/microsoft/terminal/tree/main/src>
+- [9]（一次・実 PR）microsoft/terminal PR #1919 — #459「IME UI does not follow the cursor in Windows Terminal」の修正: <https://github.com/microsoft/terminal/pull/1919>
+- （一次・公式 doc）WezTerm `use_ime`（**現行は全プラットフォーム既定 `true`（20220319 以降）。Windows では IME 常時有効で `use_ime` は効果なし／無効化不可**。X11/Wayland で本設定が効く）: <https://wezterm.org/config/lua/config/use_ime.html>
 
-> 一次情報の読み方の注意: [8] の「ネイティブ端末では起きない」は一般論であり、[7] のように
-> 自己再描画する CLI と組み合わせると native でも崩れうる。本書はこの緊張をそのまま残し、
+> 情報の読み方の注意: 「ネイティブ端末では起きにくい」という整理は**二次的な一般論**であり、[7] のように
+> 自己再描画する CLI と組み合わせると native（端末エミュレータ）でも崩れうる。本書はこの緊張をそのまま残し、
 > 実走で WezTerm 素 vs tmux の parity を確定する立場を取る。
-</content>
-</invoke>

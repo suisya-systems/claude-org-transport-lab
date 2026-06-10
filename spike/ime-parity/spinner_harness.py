@@ -3,7 +3,9 @@
 
 目的（ime-backend-parity-spike / Refs #6 #9）:
   Claude Code の応答生成中スピナー（「✻ Cogitating… (Ns)」等）が行う
-  **同じ位置での連続再描画**を、ANSI カーソル制御（DECSC/DECRC・CUP・EL）で忠実に再現する。
+  **同じ位置での連続再描画**を、ANSI カーソル制御（DECSC/DECRC・CUP・EL）で再現する
+  （実 Claude の内部実装シーケンスは未確認のため、本ハーネスは「代表的な同位置連続再描画刺激」を
+  生成するものであって、Claude のバイト列を忠実に複製するものではない）。
   人間がこのハーネスを **tmux** と **WezTerm 素** の各 backend で起動し、入力欄に日本語を
   IME 変換しながらタイプして、スピナー再描画が変換窓のアンカーを奪うか目視判定する。
 
@@ -34,6 +36,7 @@
 from __future__ import annotations
 
 import argparse
+import codecs
 import sys
 import threading
 import time
@@ -116,7 +119,12 @@ class SpinnerHarness:
         self.transcript_rows = rows - 3      # 上部 transcript 領域（1..rows-3）
         self.sep_row = rows - 2
         self.prompt = "❯ "
-        self.input_cells = cell_width(self.prompt)  # 入力欄カーソルの現在列（1-based 末尾）
+        self._base_cells = cell_width(self.prompt)
+        self.input_cells = self._base_cells   # 入力欄カーソルの現在列（1-based 末尾）
+        self.input_buf: list[str] = []        # 確定済み入力文字（幅追跡・Backspace 用）
+        # 入力バイトの逐次 UTF-8 デコーダ。raw byte はそのままエコーし、
+        # 完成した文字だけを幅追跡へ反映する（1 byte ずつの誤 decode による mojibake を避ける）。
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
         self.transcript: list[str] = []
         self._lock = threading.Lock()
         self._stop = threading.Event()
@@ -128,7 +136,15 @@ class SpinnerHarness:
 
     # ---- 描画プリミティブ（呼び出し側で self._lock を保持すること） ----
     def _w(self, s: str) -> None:
-        sys.stdout.write(s)
+        """ANSI/テキストを UTF-8 バイトで書く（raw byte エコーと順序を保つため buffer に統一）。"""
+        sys.stdout.buffer.write(s.encode("utf-8"))
+
+    def _wb(self, b: bytes) -> None:
+        """入力 raw byte をそのまま端末へ返す（端末側で UTF-8 を合成。decode しない）。"""
+        sys.stdout.buffer.write(b)
+
+    def _flush(self) -> None:
+        sys.stdout.buffer.flush()
 
     def _repaint_static(self) -> None:
         """初期画面（banner / 区切り / 入力プロンプト）を描く。"""
@@ -141,7 +157,7 @@ class SpinnerHarness:
         self._draw_spinner_locked(initial=True)
         # 実カーソルを入力欄末尾に置く（IME はここに錨を打つ）
         self._w(cup(self.input_row, self.input_cells + 1))
-        sys.stdout.flush()
+        self._flush()
 
     def _banner_lines(self) -> list[str]:
         st = self.args.state
@@ -161,7 +177,11 @@ class SpinnerHarness:
         if self._spinner_on:
             body = spinner_text(self._frame, elapsed, self._tokens)
         elif initial:
-            body = "(idle — スピナー停止。対照群)"
+            # 非スピナー状態は state ごとに表示を変える（idle と long-input を区別する）
+            if self.args.state == "long-input":
+                body = "(長文入力中 — スピナー停止・対照群: 下の ❯ に複数行の長い日本語を変換入力)"
+            else:
+                body = "(idle — スピナー停止・対照群)"
         else:
             return
         text = body[: self.cols]
@@ -202,8 +222,21 @@ class SpinnerHarness:
                     self._stream_i += 1
                     self._repaint_transcript_locked()
                     last_stream = now
-                sys.stdout.flush()
+                self._flush()
             time.sleep(period)
+
+    def _echo_byte(self, ch: bytes) -> None:
+        """通常入力バイト 1 つを raw エコーし、完成文字だけ幅追跡へ反映する（lock 下で呼ぶ）。
+
+        raw byte をそのまま端末へ返す（端末が UTF-8 を合成）ため mojibake しない。
+        確定済み日本語（マルチバイト）も正しく入力欄に入る — 手動 AC の中心観点 (c)。
+        """
+        self._wb(ch)
+        for c in self._decoder.decode(ch):
+            if c in ("\r", "\n"):
+                continue
+            self.input_buf.append(c)
+            self.input_cells += cell_width(c)
 
     # ---- 入力スレッド（POSIX raw mode）----
     def _read_input_posix(self) -> None:
@@ -224,20 +257,19 @@ class SpinnerHarness:
                     break
                 with self._lock:
                     if b == 0x15:                  # Ctrl+U: 入力欄クリア
-                        self.input_cells = cell_width(self.prompt)
+                        self.input_buf.clear()
+                        self.input_cells = self._base_cells
+                        self._decoder.reset()
                         self._w(cup(self.input_row, 1) + el_to_eol() + self.prompt
                                 + cup(self.input_row, self.input_cells + 1))
-                    elif b in (0x7F, 0x08):        # Backspace（概算: 1 セル戻す）
-                        if self.input_cells > cell_width(self.prompt):
-                            self.input_cells -= 1
+                    elif b in (0x7F, 0x08):        # Backspace: 直近 1 文字を幅ぶん戻す
+                        if self.input_buf:
+                            c = self.input_buf.pop()
+                            self.input_cells -= cell_width(c)
                             self._w(cup(self.input_row, self.input_cells + 1) + el_to_eol())
                     else:
-                        # 確定済みバイトをそのままエコー（マルチバイトは端末が合成）
-                        self._w(ch.decode("latin-1"))
-                        # 列追跡は UTF-8 完成時のみ概算更新（先頭バイトのみ計上）
-                        if b < 0x80 or b >= 0xC0:
-                            self.input_cells += 1 if b < 0x80 else 2
-                    sys.stdout.flush()
+                        self._echo_byte(ch)
+                    self._flush()
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
@@ -249,7 +281,7 @@ class SpinnerHarness:
             with self._lock:
                 self._repaint_static()
             self._w(SHOW_CURSOR)
-            sys.stdout.flush()
+            self._flush()
             anim = threading.Thread(target=self._animate, daemon=True)
             anim.start()
             if self.args.no_input or not sys.stdin.isatty():
@@ -267,7 +299,7 @@ class SpinnerHarness:
             self._stop.set()
             time.sleep(0.05)
             self._w(SHOW_CURSOR + ALT_SCREEN_OFF)
-            sys.stdout.flush()
+            self._flush()
         return 0
 
 
@@ -309,6 +341,17 @@ def selftest() -> int:
     seq2 = "".join(buf2)
     check("cup-mode returns to input row", cup(h2.input_row, h2.input_cells + 1) in seq2)
     check("cup-mode no DECSC", SAVE_CURSOR not in seq2)
+    # UTF-8 確定入力のエコー往復: 1 byte ずつ食わせても mojibake せず raw byte が戻ること
+    # （旧 latin-1 decode のリグレッション検出。手動 AC 観点 (c) をハーネスが壊さない保証）。
+    h3 = SpinnerHarness(argparse.Namespace(state="ime", cursor_mode="save", hz=10,
+                                           no_input=True, duration=0), rows=24, cols=80)
+    raw: list[bytes] = []
+    h3._wb = raw.append  # type: ignore[method-assign]
+    for byte in "日本ABc".encode("utf-8"):
+        h3._echo_byte(bytes([byte]))
+    check("utf8 echo roundtrip (no mojibake)", b"".join(raw) == "日本ABc".encode("utf-8"))
+    check("utf8 input buffer chars", h3.input_buf == ["日", "本", "A", "B", "c"])
+    check("utf8 width tracked (CJK=2)", h3.input_cells == h3._base_cells + 2 + 2 + 1 + 1 + 1)
     print("\n自己診断:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 

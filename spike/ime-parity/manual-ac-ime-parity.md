@@ -81,15 +81,14 @@ python3 spinner_harness.py --state <idle|long-input|streaming|ime> [--cursor-mod
 
 「WezTerm を唯一の人間入力端末にする」想定。**tmux で包まない**（WezTerm 素の native IME を見るため）。
 
-1. **WezTerm の `use_ime` を有効化**（重要 — 既定 false では日本語入力自体が無効）。
-   `~/.wezterm.lua`（または `%USERPROFILE%\.wezterm.lua`）に:
-   ```lua
-   return {
-     use_ime = true,
-     -- 必要なら preedit 描画様式も記録対象: ime_preedit_rendering = 'builtin' | 'system'
-   }
-   ```
-   変更後は WezTerm を**再起動**（`use_ime` は再起動で反映、WezTerm 公式 doc）。
+1. **IME を確認**（`use_ime` の扱いは構成で異なる — WezTerm 公式 doc）:
+   - **Windows 側 `wezterm.exe`（第一想定）**: Windows では IME は**常時有効**で、`use_ime` 設定は
+     **効果がない**（無効化もできない）。追加設定は不要。そのまま日本語入力できる。
+   - **Linux ビルド（X11/Wayland）**: `use_ime` は現行**全プラットフォーム既定 `true`**（20220319 以降）。
+     日本語入力には fcitx5/ibus 等の IME 環境設定（`GTK_IM_MODULE` / `XMODIFIERS` 等）が前提。
+     `~/.wezterm.lua` で明示するなら `return { use_ime = true }`。変更後は WezTerm を**再起動**。
+   - 任意の記録対象: `ime_preedit_rendering = 'builtin' | 'system'`（preedit 描画様式。save/cup や
+     backend で差が出たら §5 に記録）。
 2. WezTerm を**ホスト端末として**起動し、WSL シェルを開く:
    - Windows 側 `wezterm.exe`（GUI）で WSL を起動する構成を第一に想定。例:
      `wezterm.exe start -- wsl.exe ~` あるいは WezTerm の起動ドメインを WSL に設定。
@@ -194,8 +193,8 @@ python3 spinner_harness.py --state <idle|long-input|streaming|ime> [--cursor-mod
 - [tmux レッグ] ホスト端末と版:               （例: Windows Terminal 1.x、$WT_SESSION=...）
                 tmux バージョン:
 - [WezTerm レッグ] wezterm --version:
-                  use_ime 値:                 （true 必須）
                   Windows wezterm.exe か Linux ビルドか:
+                  use_ime 値:                 （Windows は常時有効・設定無効。Linux は既定 true）
                   ime_preedit_rendering（設定していれば）:
 - spinner_harness.py の git revision:
 - 備考（既知の癖・スクリーンショットの所在 等）:
@@ -211,4 +210,3 @@ python3 spinner_harness.py --state <idle|long-input|streaming|ime> [--cursor-mod
   揺れの許容範囲を独断で広げない。緩和策の検討が要る場合は窓口にエスカレーションする。
 - 結果は本ファイルの §4/§5 に追記するか、`spike/RESULTS.md` に「IME backend parity（手動）」節を
   設けて転記する（GO/NO-GO 列を保ったまま）。
-</content>

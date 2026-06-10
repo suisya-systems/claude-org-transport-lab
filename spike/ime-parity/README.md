@@ -26,7 +26,7 @@ tmux new -s ime-parity
 python3 spinner_harness.py --state ime         # 変換しながら ❯ にタイプ
 python3 spinner_harness.py --state ime --cursor-mode cup
 
-# WezTerm 素レッグ（use_ime=true 必須・再起動要）
+# WezTerm 素レッグ（Windows wezterm.exe は IME 常時有効・設定不要 / Linux ビルドは use_ime 既定 true + fcitx5 等）
 python3 spinner_harness.py --state ime
 python3 spinner_harness.py --state ime --cursor-mode cup
 ```
@@ -37,4 +37,3 @@ python3 spinner_harness.py --state ime --cursor-mode cup
 
 [`../manual-ime-test.md`](../manual-ime-test.md) は **broker のナッジ打鍵注入**が IME 変換を壊すかの輸送層検証。
 本スパイクは **Claude 自身のスピナー自己再描画**が backend を跨いで IME と共存するかの描画層検証で、別物。
-</content>
