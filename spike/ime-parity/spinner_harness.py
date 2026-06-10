@@ -81,6 +81,25 @@ def cell_width(text: str) -> int:
     return w
 
 
+def clip_cells(text: str, max_cells: int) -> str:
+    """セル幅で切り詰める（CJK=2 セルを考慮）。
+
+    コードポイント数での切り詰め（`text[:cols]`）は CJK で実セル幅が 2 倍になり、
+    行が端末幅を超えて**折り返し、下の行（入力欄）を侵食する**。固定行レイアウトを
+    守るため、表示する全行はこの関数でセル幅基準に切る。
+    """
+    out: list[str] = []
+    used = 0
+    for ch in text:
+        w = 0 if unicodedata.combining(ch) else (
+            2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1)
+        if used + w > max_cells:
+            break
+        out.append(ch)
+        used += w
+    return "".join(out)
+
+
 # ---------------------------------------------------------------------------
 # スピナー表現（Claude Code 風）
 # ---------------------------------------------------------------------------
@@ -151,8 +170,8 @@ class SpinnerHarness:
         self._w(CLEAR_SCREEN)
         banner = self._banner_lines()
         for i, line in enumerate(banner[: self.transcript_rows], start=1):
-            self._w(cup(i, 1) + el_to_eol() + line[: self.cols])
-        self._w(cup(self.sep_row, 1) + el_to_eol() + "─" * self.cols)
+            self._w(cup(i, 1) + el_to_eol() + clip_cells(line, self.cols - 1))
+        self._w(cup(self.sep_row, 1) + el_to_eol() + "─" * (self.cols - 1))
         self._w(cup(self.input_row, 1) + el_to_eol() + self.prompt)
         self._draw_spinner_locked(initial=True)
         # 実カーソルを入力欄末尾に置く（IME はここに錨を打つ）
@@ -164,9 +183,9 @@ class SpinnerHarness:
         cm = self.args.cursor_mode
         return [
             f"== スピナー再現ハーネス ==  state={st}  cursor-mode={cm}  hz={self.args.hz}",
-            "tmux / WezTerm 素 の両 backend で起動し、下の ❯ 入力欄に日本語を IME 変換しながら",
-            "タイプして、スピナー再描画が変換窓のアンカーを奪うか目視判定してください。",
-            "  Ctrl+U: 入力欄クリア   Ctrl+C: 終了   （入力欄は 1 行モデル: Enter/折返しは無視）",
+            "tmux / WezTerm 素 で起動し、下の ❯ に日本語を IME 変換しながらタイプして、",
+            "スピナー再描画が変換窓のアンカーを奪うか目視判定してください。",
+            "  Ctrl+U: クリア / Ctrl+C: 終了 / 入力欄は 1 行モデル(Enter・折返しは無視)",
             "（手順と GO/NO-GO テンプレは manual-ac-ime-parity.md を参照）",
             "",
         ]
@@ -179,12 +198,12 @@ class SpinnerHarness:
         elif initial:
             # 非スピナー状態は state ごとに表示を変える（idle と long-input を区別する）
             if self.args.state == "long-input":
-                body = "(長文入力中 — スピナー停止・対照群: 下の ❯ に端末幅に近い長い 1 行の日本語を変換入力)"
+                body = "(長文入力中: スピナー停止・対照。❯ に端末幅に近い長い 1 行を変換入力)"
             else:
                 body = "(idle — スピナー停止・対照群)"
         else:
             return
-        text = body[: self.cols]
+        text = clip_cells(body, self.cols - 1)
         if self.args.cursor_mode == "save":
             # DECSC/DECRC 往復: 保存 → スピナー行へ → 上書き → 復元
             self._w(SAVE_CURSOR + cup(self.spinner_row, 1) + el_to_eol() + text + RESTORE_CURSOR)
@@ -202,7 +221,7 @@ class SpinnerHarness:
             r = base + 1 + i
             if r >= self.sep_row:
                 break
-            out.append(cup(r, 1) + el_to_eol() + line[: self.cols])
+            out.append(cup(r, 1) + el_to_eol() + clip_cells(line, self.cols - 1))
         out.append(RESTORE_CURSOR)
         self._w("".join(out))
 
@@ -368,9 +387,26 @@ def selftest() -> int:
     # 端末幅キャップ: cols を超える入力は無視され input_cells が cols 未満に閉じること
     h4 = SpinnerHarness(argparse.Namespace(state="ime", cursor_mode="cup", hz=10,
                                            no_input=True, duration=0), rows=24, cols=20)
+    h4._wb = lambda b: None  # type: ignore[method-assign]  # エコー出力を捨てる
     for _ in range(40):
         h4._echo_byte("あ".encode("utf-8"))
     check("width cap keeps single line", h4.input_cells < h4.cols)
+    # clip_cells: セル幅基準で切ること（CJK=2）。コードポイント数では折返しを防げない。
+    check("clip_cells by width", clip_cells("あいうえお", 5) == "あい")  # 2+2 <=5, 次の 2 で超過
+    check("clip_cells ascii", clip_cells("abcdef", 3) == "abc")
+    # 全 banner 行 + 各 state の status 行が cols-1 以内（折返しで入力欄を侵食しない保証）。
+    for st in ("idle", "long-input", "streaming", "ime"):
+        hb = SpinnerHarness(argparse.Namespace(state=st, cursor_mode="save", hz=10,
+                                               no_input=True, duration=0), rows=24, cols=80)
+        widest = max(cell_width(s) for s in hb._banner_lines())
+        check(f"banner fits ({st}, widest={widest})", widest <= hb.cols - 1)
+        cap: list[str] = []
+        hb._w = cap.append  # type: ignore[method-assign]
+        hb._draw_spinner_locked(initial=True)
+        # 描画された status 本文のセル幅（ANSI を除いた可視文字）が cols-1 以内
+        import re as _re
+        visible = _re.sub(r"\x1b\[[0-9;]*[A-Za-z]|\x1b[78]", "", "".join(cap))
+        check(f"status fits ({st})", cell_width(visible) <= hb.cols - 1)
     print("\n自己診断:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 
