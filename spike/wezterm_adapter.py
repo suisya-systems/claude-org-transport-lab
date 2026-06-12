@@ -92,9 +92,47 @@ class WezTermAdapter:
 
     # ------------------------------------------------------------------ list
     def list_panes(self) -> list[dict]:
-        """`wezterm cli list --format json` の生エントリ一覧。"""
+        """`wezterm cli list --format json` を broker が期待する flat geometry へ正規化する。
+
+        実 WezTerm (20240203) の `cli list` は geometry を **size:{cols,rows} /
+        left_col / top_row / is_active** で返す。一方 broker.mcp_list_panes() は tmux
+        adapter が出す **flat な width/height/left/top/active** を読む
+        (`int(rec["width"])` / `rec.get("x", rec.get("left", 0))` /
+        `rec.get("focused", rec.get("active", False))`)。WezTerm 生 json を無正規化で
+        素通しすると broker.mcp_list_panes() が `rec["width"]` で KeyError になり、
+        spawn_agent / resolve_balanced_split / pane-ops MCP 面が実 WezTerm で全滅する
+        (lab#9 で実機再現。broker-state/ac9/defect-geometry.json)。tmux adapter
+        (TmuxAdapter.list_panes) と対称になるよう、ここで
+        size.cols→width / size.rows→height / left_col→left / top_row→top /
+        is_active→active(bool) に写す。pane_id / tab_id / window_id / cursor_x /
+        cursor_y は spawn/split の追跡と inspect cursor 用にそのまま残す。
+        """
         proc = self._cli("list", "--format", "json")
-        return json.loads(proc.stdout)
+        out: list[dict] = []
+        for r in json.loads(proc.stdout):
+            size = r.get("size")
+            if not isinstance(size, dict) or "cols" not in size or "rows" not in size:
+                # size.cols/rows 欠落を width/height=0 へ丸めると、WezTerm の JSON schema
+                # drift や parse 不備を「例外なしの geometry」として下流 (mcp_list_panes /
+                # choose_split) に流し、契約違反の検出を遅らせる。正規化は adapter 境界の
+                # 責務なので、欠落は明示エラーにして defect の再発見性を保つ (codex Minor 対応)。
+                raise RuntimeError(
+                    f"wezterm cli list: pane {r.get('pane_id')!r} に size.cols/rows が無い "
+                    f"(schema drift?): keys={sorted(r.keys())}"
+                )
+            out.append({
+                "pane_id": r["pane_id"],
+                "tab_id": r.get("tab_id"),
+                "window_id": r.get("window_id"),
+                "left": int(r.get("left_col", 0)),
+                "top": int(r.get("top_row", 0)),
+                "width": int(size["cols"]),
+                "height": int(size["rows"]),
+                "cursor_x": int(r.get("cursor_x", 0)),
+                "cursor_y": int(r.get("cursor_y", 0)),
+                "active": bool(r.get("is_active", False)),
+            })
+        return out
 
     def pane_exists(self, pane_id: int) -> bool:
         return any(p["pane_id"] == pane_id for p in self.list_panes())
