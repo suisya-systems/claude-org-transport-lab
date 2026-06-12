@@ -147,6 +147,8 @@ Phase 2（棚卸し・契約整合）の先行実施として、リポジトリ�
 
 ### 4.3 窓口への割り込み配達（ナッジ。旧・最難関 → 実証済み）
 
+> **役割の再定義（2026-06-13、dogfood / Refs #16）— 本節は正準配送路ではない**: 本節のナッジ配達は AC-1 で「**IME・入力を壊さない**（非破壊）」ことを実証したが、その後の本番 dogfood（ja#515、2026-06-13）で **「ナッジは idle セッションを *起こさない*」**（キュー滞留したまま未処理）が観測された。したがって受信の**正準路は pull-first cadence**（各役割が所有 cadence で能動 `check_messages` / 必要箇所は `/loop` 実発火）であり、**ナッジ打鍵は任意・defer の低遅延 accelerator（[ja-migration-plan.md](ja-migration-plan.md) §8 Issue H の N1、F 同列）に降格**する。本節の静止確認・冪等性・IME 非破壊の知見は **その accelerator を安全に実装するための根拠**として有効。**特に窓口（secretary）へのナッジは採らない**（人間 IME compose 破壊 + agent を起こさないため二重に不適。窓口受信は turn 冒頭 poll + attention sidecar の二層、[broker-native-roles.md](broker-native-roles.md) §3.2 B1/B2/B3）。挙動層の一次設計は **[broker-native-roles.md](broker-native-roles.md) を参照**。
+
 MCP は要求応答型であり、対話中の Claude セッションへ push できない。renga のチャネル注入（in-band push）の代替として、以下の 2 段構えを提案する:
 
 1. **ナッジ**: broker が terminal adapter（WezTerm なら `wezterm cli send-text`）で宛先ペインに定型 1 行「📨 新着あり。check_messages を実行」+ Enter を打鍵する。
@@ -267,7 +269,7 @@ adapter は「messaging adapter（Phase 3 が要求する最小能力）」と�
 
 特に注意すべき非互換（移行時に harness prose の書き換えが必要な点）:
 
-1. **受信モデルの変化**: 現行 prose は「`<channel source=...>` が in-band で届く」前提で書かれている（worker brief の「peer message を受けたら ack」等）。pull 統一後は「ナッジを見たら `check_messages`」に書き換える必要がある。Set D 2.1 の HYBRID 規定が「source 文字列をルーティングに使うな」と先に縛ってあるため、`from_*` / `sent_at` に依存した prose はそのまま生き残る。
+1. **受信モデルの変化**: 現行 prose は「`<channel source=...>` が in-band で届く」前提で書かれている（worker brief の「peer message を受けたら ack」等）。pull 統一後は **「役割 cadence で能動 poll（`check_messages`）」** に書き換える必要がある（**ナッジは idle セッションを起こさないため「ナッジを見たら」という push 形の文言は採らない** — pull-first cadence の役割別設計は [`broker-native-roles.md`](broker-native-roles.md) を一次参照。dogfood defect 1-3 の根因是正）。Set D 2.1 の HYBRID 規定が「source 文字列をルーティングに使うな」と先に縛ってあるため、`from_*` / `sent_at` に依存した prose はそのまま生き残る。
 2. **spawn 直後の儀式の変化**: dev-channel 承認（spawn-flow 3-3b）が消え、信頼確認プロンプト対応（有無・機械承認可否は Phase 1 AC-2 で実測）に変わる。`list_peers` 登録待ち（3-4）は **broker の bind 表ベース `list_peers` poll として同型のまま維持**する（`agent_ready` は latency 改善の補助であり正道ではない）。
 3. **エラー分岐の追加**: `token_*` / `nudge_failed` / `adapter_unavailable` の分岐が dispatcher / secretary の error handling prose に追加される。未知コード non-fatal 規定（6.2）があるため、追加自体は破壊的でない。
 
@@ -286,6 +288,8 @@ adapter は「messaging adapter（Phase 3 が要求する最小能力）」と�
 最小実証: 対話ペイン spawn → broker MCP 接続（`--mcp-config` 注入）→ token 帰属付きナッジ → `check_messages` の一往復。
 
 合格条件は AC-1（ナッジ 4 状態）と AC-2（接続チェーン）の **2 本立てで、両方の合格を Phase 2 以降へ進む条件**とする。**両 AC とも GO 済**（[`spike/RESULTS.md`](../../spike/RESULTS.md)）。
+
+> **AC-1 の射程（2026-06-13 注記、Refs #16）**: AC-1 は「ナッジが**入力・IME を壊さない**」（非破壊）を実証する。**「ナッジが idle セッションを*起こす*」ことは実証しない**（dogfood で否定）。よって AC-1 GO は **任意 accelerator（N1）の安全性根拠**であって、受信の正準路の合格条件ではない。受信の正準路は pull-first cadence（[broker-native-roles.md](broker-native-roles.md) §2）。
 
 **AC-1 — ナッジ注入の 4 状態テスト（go/no-go。旧・計画中止条項は GO により解消、2026-06-11）**:
 
@@ -321,7 +325,8 @@ adapter は「messaging adapter（Phase 3 が要求する最小能力）」と�
 フォークで `send_message` / `check_messages` / `list_peers` / `set_summary` の呼出を broker ツールへ配線替えし、以下を通したら本体へ取り込む:
 
 - worker / curator / dispatcher / secretary 間の全メッセージ経路（完了報告 / ack / 判断仰ぎ / DELEGATE / CURATE_* / retro gate）が broker 経由で一巡すること（renga チャネル不使用で 1 委譲サイクル完走）。
-- ナッジ配達の実運用成立: 静止確認 defer が IME / 長文入力と共存し、配達遅延が運用上許容できること（attention watcher の通知経路が壊れないことを含む）。
+- **受信の正準路成立（2026-06-13 再定義、Refs #16）**: 各役割が pull-first cadence で受信を取りこぼさないこと（worker=実行中ターン境界 poll + 完了後 bounded `/loop` / dispatcher=`/loop 3m` 実発火に `check_messages` 同梱 / secretary=ターン冒頭必須 poll + attention sidecar）。**ナッジ打鍵の実運用成立は Phase 3 の*必須*完了条件から外す**（任意 accelerator N1 へ降格 — dogfood で「ナッジは idle を起こさない」が判明したため、正しさは pull-first cadence が担保する）。挙動層の一次設計・役割別 cadence は [broker-native-roles.md](broker-native-roles.md) を参照。
+- （任意）ナッジ accelerator を実装する場合のみ: 静止確認 defer が IME / 長文入力と共存し、配達遅延が運用上許容できること（attention watcher の通知経路が壊れないことを含む。secretary は除外）。
 - 帰属の検証: 全メッセージの `from` が token 由来で正しく付き、なりすまし送信（他 agent の to_id を騙る試行）が構造的に不可能であること。
 - 取り込み時の同時変更: 分類 (b) の許可スキーマ再宣言、分類 (a) のメッセージング系 prose 書き換え、Set D Surface 2 / 5 の契約改訂 PR、**Set C の state files inventory への `.state/broker/` subtree 追加改訂**（[§4.5](#45-broker-queue-storestatebroker-専用-subtree)）、non-goals §12 の改訂提案。
 
