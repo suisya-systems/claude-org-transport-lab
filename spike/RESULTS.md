@@ -70,8 +70,11 @@ Phase 1（WezTerm / Windows）と Phase 2（tmux / POSIX）の AC 判定を記�
 - **静止後ドレイン: GO**。入力欄クリア後にナッジが配達され、TEST-1〜10 まで全メッセージ
   欠落なく受信。defer→drain の一巡が成立。
 - **判定: AC-1 状態 2 = 合格**。AC-1 全 4 状態 GO。**Phase 1 ゲート通過**。
-- **副次知見**: WezTerm は GUI を起こさず mux-server だけで spawn が成立する
-  （GUI は `wezterm-gui connect unix` で後付け attach 可能）。adapter は GUI 非依存で動作する。
+- **副次知見**: WezTerm は GUI を起こさず headless mux-server だけで spawn が成立する。adapter は GUI 非依存で動作する。
+  - **訂正 (2026-06-13 / lab#9 実機再検証)**: 旧記述「GUI は `wezterm-gui connect unix` で後付け attach 可能」は**誤り**。
+    ユーザー config に `unix_domains` 定義が無いため `connect unix` は attach できず、また Windows では `wezterm cli` が
+    `wezterm-gui` に接続不能。**現行 adapter/config のまま GUI で中を覗く手段は無い**（headless 運用が確定）。
+    可視化の成立条件は Phase 9 / `ac9-wezterm-evidence.md` §5（+ #540）参照。
 
 ## 実装中に確定した実測知見
 
@@ -472,3 +475,64 @@ Phase 1（WezTerm / Windows）と Phase 2（tmux / POSIX）の AC 判定を記�
 - **prose 書き換え・契約改訂（Set D/C・non-goals §12）は本体取り込みスコープ**: ja 不可触制約（Epic #6 完動ゲート前）
   により本フォークでは行わない（Phase 3/4 と同じ）。
 - **WezTerm 実機 AC は Issue #9（Windows 専用）**。本ゲートの backend は tmux 実機で実証（Phase 2/4 と同じ人間承認読み替え）。
+
+---
+
+## Phase 9 / AC-9（WezTerm backend 実機 AC / Issue #9）
+
+Phase 4 で tmux に読み替えた「該当 backend 実機で 1 サイクル完走」の **WezTerm (Windows) 側の実機担保**。
+実 WezTerm の pane に対して broker のペイン操作 6 面 + ライフサイクル + イベント合成 + 画面状態観測 +
+メッセージング 1 サイクルを往復実証する。**FakeAdapter は使わず実 WezTermAdapter で実 pane (PTY) を駆動**。
+**重要 (可視性の訂正)**: 接続先は **headless `wezterm-mux-server`** で **GUI ウィンドウは画面に出ない**。pane は実 PTY だが
+描画されない（= tmux と同格の headless 運用。当初「実ウィンドウが見える」とした記述は誤りで、§5 / `ac9-wezterm-evidence.md` §0・§5 で訂正）。
+詳細証跡: [`ac9-wezterm-evidence.md`](./ac9-wezterm-evidence.md)。実行: `py -3 run_ac9.py`。
+
+- 環境: WezTerm `20240203-110809-5046fc22` / Windows 11。判定の正本は `broker-state/ac9/result.json`。
+- 課金中立: spawn 全プロセスは無課金 probe（`wezterm_probe.py`、実 Claude 不起動）。probe-only スコープは
+  窓口/ユーザー判断（2026-06-13）で承認。実 Claude TUI on WezTerm は AC-2 Phase 1 で既証明 + #515 本番に委譲。
+  実 argv は attestation として記録。
+
+### 着手前に発見したブロッカー級 defect（geometry 無正規化）— 自己修正せず窓口確認 → A 案承認
+
+実 WezTerm `cli list --format json` は geometry を **ネスト `size:{cols,rows}` + `left_col`/`top_row`/`is_active`**
+で返すが、`broker.mcp_list_panes()` は **flat** `width`/`height`/`x`/`left`/`active` を読む（tmux adapter は flat に
+正規化済み）。WezTerm adapter が生 json を無正規化で素通ししていたため、実 WezTerm で
+`broker.mcp_list_panes()` が **`KeyError: 'width'`（broker.py:1014）** で落ち、`spawn_agent` /
+`resolve_balanced_split` / pane-ops MCP 面が **WezTerm 実機で全滅**していた（この経路は過去 AC で WezTerm
+実機未実行）。Issue #9 goal(3)「geometry 差分」がそのままブロッカー化したもの。
+
+- 方針どおり**自己修正せず窓口へスコープ確認** → ユーザー判断で **A 案（本タスク内で正規化修正し full AC を通す）** 承認。
+- 修正: `WezTermAdapter.list_panes()` で tmux と対称に flat 正規化（`size.cols→width` / `size.rows→height` /
+  `left_col→left` / `top_row→top` / `is_active→active`）。broker 本体・tmux adapter は無改変（正規化は adapter 境界に閉じる）。
+- 修正前再現: `broker-state/ac9/defect-geometry.json`。修正後: `mcp_list_panes()` が例外なく geometry を返す。
+
+### AC-9 検証項目 — **総合 GO（全 5 項目 green）**
+
+| 項目 | 判定 | 根拠（要旨） |
+|---|---|---|
+| AC-9-attestation | **GO** | secretary/dispatcher pane の get-text に probe バナー `[lab9-probe]` を確認（実 argv=`py -3 wezterm_probe.py` の実プロセス起動を裏取り。課金中立 attestation を AC 判定に反映） |
+| AC-9-geometry | **GO** | 正規化後 `mcp_list_panes()` が実 WezTerm `cli list` を flat geometry へ写し例外なく返す（defect 修正の通過証跡） |
+| AC-9-surface | **GO** | 実 2 pane の geometry で `resolve_balanced_split` が `choose_split` 再利用で split を解決（`target=2 dir=vertical`）。worker token は pane 操作 6 面を `call_tool` しても `[tool_forbidden]` |
+| AC-9-cycle | **GO** | delegate→spawn(実 split)→監視(承認待ち/stall を実 get-text→classify で独立観測)→完了報告(token 由来 from)→CLOSE_PANE(token revoke + pane_exited)→retro が renga 不使用で完走 |
+| AC-9-events | **GO** | broker 非経由の直 kill（クラッシュ）が次 poll の `list_panes` reconcile で `pane_exited` 回復 + reap で token revoke |
+
+監視の状態観測は **実 WezTerm get-text → `classify_pane_state`**（Fake 合成画面ではない）。probe が claude 2.1.168
+較正描画を実 PTY に出し、scrape して idle / input_pending(承認待ち) / busy(stall) を判定。
+
+### tmux 実機との差分（Issue #9 goal 3、事実のみ）
+
+唯一の実質差は **geometry 表現**（tmux=flat / WezTerm=ネスト `size` + `left_col/top_row/is_active`）で、adapter 境界の
+正規化 1 箇所で吸収（本 AC で実施・実証）。その他（イベント合成・ライフサイクル・権限分離・balanced split）は backend
+非依存に同型で成立。pane_id 型（tmux=`%N` / WezTerm=int）、lifecycle（tmux=detached new-session / WezTerm=**headless
+mux-server**・GUI ウィンドウは出ない）、focus モデル（WezTerm `is_active` は tab/window ごと）、get-text（WezTerm は
+viewport 全高を返すため busy ヒントの下部寄せが必要）等の差は [`ac9-wezterm-evidence.md`](./ac9-wezterm-evidence.md) §3 に表で記録。
+
+### 既知制限（Phase 9 / AC-9）
+
+- **probe-only（無課金）**: 状態観測は probe が再現する claude 2.1.168 較正描画に対する get-text→classify の成立を示すもので、
+  「実 Claude が WezTerm でその描画を出すこと」自体の再証明ではない（それは AC-2 Phase 1 で既済 + #515 本番に委譲）。
+- **実機分は CI 非常設**: 実 mux-server + Windows 専用のため。決定的 backend 非依存検証は FakeAdapter（`run_ac4` / dogfood）が担う。
+- **正規化は adapter 境界の修正**: 本体（claude-org-runtime）取り込み時は同じ正規化を runtime 側 WezTerm adapter へ移植する。
+- **headless mux 運用（可視 GUI なし）**: 本 AC は `wezterm cli`→headless `wezterm-mux-server` 経由で、GUI ウィンドウは出ない
+  （= tmux と同格）。人間が GUI で覗く可視化には (a) ユーザー config の `unix_domains` 追加 + (b) adapter の `--domain-name`
+  spawn の両方が要り、C 案（adapter 不変・config 不変）では成立しない。検証ログと成立条件は `ac9-wezterm-evidence.md` §5（#540）。
