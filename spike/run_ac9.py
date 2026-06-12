@@ -8,7 +8,9 @@ Linux/WSL2 環境では正準 backend の **tmux** に読み替えて完走済�
 画面状態観測 + メッセージング 1 サイクルを往復実証する。
 
 検証方式:
-- FakeAdapter ではなく **実 WezTermAdapter** を使い、実ウィンドウ/ペインを spawn/split/kill する。
+- FakeAdapter ではなく **実 WezTermAdapter** を使い、実 pane (PTY) を spawn/split/kill する。
+  注意: 接続先は **headless `wezterm-mux-server`** であり **GUI ウィンドウは出ない**。pane は mux 内の
+  実 PTY だが画面には描画されない (= tmux と同格の headless 運用)。可視化条件は ac9-wezterm-evidence.md §5 / #540。
 - spawn される全プロセスは **無課金 probe** (wezterm_probe.py。実 Claude を起動しない)。
   課金中立スコープは窓口/ユーザー判断 (2026-06-13) で probe-only AC を承認 (実 Claude TUI は
   AC-2 Phase 1 で既証明 + #515 本番サイクルに委譲)。spawn する実 argv は attestation として記録する。
@@ -62,7 +64,7 @@ def log(msg: str) -> None:
 
 
 class WezSession:
-    """実 WezTerm 上の broker + WezTermAdapter + 役割 token の結線 (1 ウィンドウ)。"""
+    """実 WezTerm 上の broker + WezTermAdapter + 役割 token の結線 (headless mux 上の 1 論理ウィンドウ)。"""
 
     def __init__(self) -> None:
         self.adapter = WezTermAdapter()
@@ -99,7 +101,8 @@ class WezSession:
 
         spawn_agent は worker/curator のみ spawn 可 (SPAWNABLE_ROLES) のため、
         orchestrator 2 役は adapter.spawn(new_window) + adapter.split で直接立て、
-        role token を bind する。これで実 2 pane が 1 ウィンドウに並ぶ。
+        role token を bind する。これで実 2 pane が headless mux 上の 1 論理ウィンドウに並ぶ
+        (GUI は出ない。画面表示ではなく cli list / get-text の機械観測対象)。
         """
         sec = self.adapter.spawn(PROBE_ARGV, cwd=SPIKE_DIR, new_window=True)
         self.panes["secretary"] = sec
@@ -345,8 +348,10 @@ TMUX_WEZTERM_DIFF = {
     },
     "pane_lifecycle": {
         "tmux": "spawn=new-session -d (detached、GUI 不要)。kill-pane / kill-server。CI/WSL2 で無頭運用可",
-        "wezterm": "spawn=cli spawn --new-window (GUI mux 必須、実ウィンドウが出る)。split-pane / kill-pane。"
-                   "mux 未起動時は cli が auto-start (--no-auto-start だと接続不可)",
+        "wezterm": "spawn=cli spawn --new-window だが接続先は headless wezterm-mux-server。GUI ウィンドウは出ない "
+                   "(--new-window は mux モデル上の論理ウィンドウのみ。Windows では cli が wezterm-gui に接続不可)。"
+                   "実質 tmux と同じ headless 運用。可視化には (a) ユーザー config の名前付き unix_domain 追加 + "
+                   "(b) adapter の --domain-name spawn の両方が必要 (evidence §5 / #540)",
     },
     "events": {
         "tmux": "list-panes 差分から pane_started/pane_exited を合成 (backend 非依存の broker._reconcile)",

@@ -4,12 +4,28 @@
 Phase 4 (`run_ac4.py`) は「該当 backend 実機で 1 サイクル完走」を Linux/WSL2 では正準 backend の
 **tmux** に読み替えて完走済み。本 AC はその **WezTerm (Windows 専用) 側の実機担保** を埋める。
 
-- 実行: `py -3 spike/run_ac9.py` (実 WezTerm ウィンドウが 1 枚出る)
+- 実行: `py -3 spike/run_ac9.py`（**GUI ウィンドウは画面に出ない** — §0 参照。headless mux 運用）
 - 環境: WezTerm `20240203-110809-5046fc22` / `C:\Program Files\WezTerm\wezterm.exe` / Windows 11
 - 判定: **GO (全 5 項目 green)** — `broker-state/ac9/result.json`
 - 課金中立: spawn する全プロセスは無課金 probe (`wezterm_probe.py`、実 Claude 不起動)。
   probe-only スコープは窓口/ユーザー判断 (2026-06-13) で承認。実 Claude TUI on WezTerm は
   AC-2 Phase 1 で既証明 + #515 本番サイクルに委譲。実 argv は attestation として記録。
+
+---
+
+## 0. 重要な訂正: 本 AC は headless mux 運用であり、GUI ウィンドウは画面に出ない
+
+**事実訂正 (2026-06-13、ユーザー指摘 → 実機再検証で確定。C 案)**: 当初この文書は「実 WezTerm ウィンドウが
+画面に出る」前提で書かれていたが、それは**誤り**だった。本 AC の pane 操作はすべて
+`wezterm cli`（`--no-auto-start`）経由で **headless の `wezterm-mux-server.exe`** に対して行われ、
+**GUI（`wezterm-gui.exe`）は一切起動せず、画面には何も描画されない**。pane は mux 内の実 PTY なので
+`cli list` / `get-text` / `send-text` の機械観測は本物だが（AC-9 GO×5 は有効）、その実体は
+**tmux の detached/headless 運用と同格**であり、可視 GUI ではない。
+
+このプロジェクト用語で言えば「`run_ac9` を実行すると WezTerm が見える」という主張は**成立しない**。
+機械的 AC（GO）の価値は否定しないが、可視性に関する記述は本節の通り訂正する。
+
+詳細な機序・検証ログ・可視化の成立条件は **§5（headless mux と可視化、#540）** に記す。
 
 ---
 
@@ -133,7 +149,7 @@ token_revoked dispatcher   (直 kill → reap)
 |---|---|---|
 | **geometry キー** | `list-panes -F` が flat `left/top/width/height/active` を直接出す | `cli list` が **ネスト `size:{cols,rows}` + `left_col/top_row/is_active`**。broker は flat 期待 → adapter で正規化必須 (**本 AC の defect**) |
 | **pane_id 型** | 文字列 `%N`。専用 socket `-L claude-org-spike` で既存サーバーと分離 | 整数 (例 6)。native int と broker handle int の取り違え回避のため MCP 面は handle のみ露出 |
-| **pane lifecycle** | spawn=`new-session -d` (detached、GUI 不要、CI/WSL2 で無頭運用可) | spawn=`cli spawn --new-window` (GUI mux 必須・実ウィンドウが出る)。mux 未起動時は cli が auto-start (`--no-auto-start` だと接続不可) |
+| **pane lifecycle** | spawn=`new-session -d` (detached、GUI 不要、CI/WSL2 で無頭運用可) | spawn=`cli spawn --new-window` だが接続先は **headless `wezterm-mux-server`**。**GUI ウィンドウは出ない**（§0/§5）。`--new-window` は mux モデル上の論理ウィンドウを作るだけ。adapter は `--no-auto-start` のため事前に mux が要る（本 spike は手動 bootstrap 依存）。→ **実質 tmux と同じ headless 運用** |
 | **events** | `list-panes` 差分から `pane_started/pane_exited` 合成 (`broker._reconcile`、backend 非依存) | 同一経路。`cli list` 差分から同様に合成。直 kill 取りこぼしも list 反映で回復 (**同型**) |
 | **focus モデル** | `pane_active` は **session 内で単一** (active pane は 1 つ) | `is_active` は **tab/window ごと**。複数ウィンドウ/タブ構成では **複数 pane が同時に `is_active:true`** になる (本 AC 着手時の初回 `cli list` で window0 pane0 と window1 pane1 が両方 true を実測)。正規化で `is_active→focused` のため、マルチウィンドウ org 配置では `focused` が複数 true になり、tmux 単一 active / renga 単一フォーカス前提と乖離する。本 AC は 1 ウィンドウのため顕在化せず GO だが、**runtime 取り込み時に `choose_split` の focused 依存ロジックが要確認**（記録のみ・本 AC では自己修正せず） |
 | **get-text** | `capture-pane -p` は描画済み行中心 | `cli get-text` は **viewport 全高 (空行込み)** を返す。busy ヒントを下部へ寄せないと `classify` の tail-20 走査外に落ちる (probe 較正で確認。実 Claude TUI は元々下部描画) |
@@ -144,13 +160,48 @@ token_revoked dispatcher   (直 kill → reap)
 
 ---
 
-## 4. 人間の目視確認が要る項目 (実機観察)
+## 4. 人間の目視確認について (訂正: 現状 GUI では目視できない)
 
-自動判定済みだが、実ウィンドウの見え方は人手確認が望ましい:
+**訂正**: 当初ここには「実ウィンドウで分割/状態切替/消滅を目視確認」と書いていたが、§0 の通り
+**本 AC は headless mux 運用で GUI ウィンドウが出ない**ため、これらは**現状 GUI で目視できない**。
+`run_ac9` が実機で行った以下は **get-text scrape による機械観測のみ**で確認済み（GUI 目視ではない）:
 
-1. `run_ac9.py` 実行中、WezTerm ウィンドウが 1 枚開き、secretary / dispatcher / worker の 3 pane に
-   分割される様子 (balanced split の見た目)。
-2. worker pane が `input` / `busy` / `idle` フレームに切り替わる様子 (probe 再描画)。
-3. CLOSE_PANE / 直 kill 後に worker・dispatcher pane が実際に消える様子。
+1. secretary / dispatcher / worker の 3 pane への balanced split（`mcp_list_panes` の geometry と
+   `pane_started` イベントで確認）。
+2. worker pane の `input` / `busy` / `idle` 切替（`inspect_pane`→`classify_pane_state` で確認。
+   スクリーンショット相当は §2 の `screens/worker-busy.txt` 等）。
+3. CLOSE_PANE / 直 kill 後の pane 消滅（`pane_exited` イベント + `list_panes` 差分で確認）。
 
-(自動 AC は get-text scrape で同等内容を判定済みのため、目視は補強であり合否の必須条件ではない。)
+可視 GUI で目視するための成立条件は §5 を参照（現行 adapter/config では不可）。
+
+---
+
+## 5. headless mux と可視化の成立条件 (#540 判断材料)
+
+### 機序 (なぜ GUI が出ないか)
+
+`wezterm cli`（adapter が使う）は **headless `wezterm-mux-server` 専用**で、`wezterm-gui` を駆動できない。
+本 spike の pane は常にこの headless mux に入り、画面には描画されない（§0）。
+
+### 実機検証ログ (2026-06-13、クリーン状態で再現確認)
+
+| 試した手動操作 | 結果 |
+|---|---|
+| `wezterm connect <name>` | config の名前付き mux ドメインを要求。未定義名は `desired default domain '…' was not found in mux!?; terminating` で即終了。ユーザー config (`~/.wezterm.lua`) に `unix_domains` 定義は**無い** |
+| 素の `wezterm-gui` 起動 | **自分専用の別 mux**（`gui-sock-<pid>`）を作る。headless mux-server の pane（別ソケット）は**映らない** = gui-sock 分離 |
+| GUI 起動中に `wezterm cli --no-auto-start list`（adapter と同一モード） | `failed to connect to Socket("gui-sock-<pid>"); terminating` で**一貫失敗**（3 秒後再試行も同一 = race ではない）。→ **Windows では cli が gui に接続不能** |
+
+→ 結論: **「人間が必要時に `wezterm-gui` を attach して中を覗く」第 3 案は、現行（adapter 不変 + config 不変）では成立しない**。
+cli が gui を駆動できず、gui は headless mux に attach できず、adapter の spawn は名前付きドメインに入らないため。
+
+### 可視化を成立させる条件（将来課題 #540 / 緊急 attach 手順）
+
+可視化（人間が GUI で中を覗く／緊急 attach）には **以下の両方**が必要:
+
+- **(a) ユーザー config への `unix_domains` 追加**: `~/.wezterm.lua` に名前付き unix domain（例 `name='org-mux'`）を定義し、
+  cli/gui が共有できる名前付き mux ソケットを用意する（**個人設定変更 = 人間判断**。本タスクでは提案・適用しない）。
+- **(b) adapter の `--domain-name` spawn**: spawner が既定ドメインではなく (a) の名前付きドメインに spawn するよう
+  `cli spawn --domain-name org-mux …` に変える（**adapter 変更**。C 案の「adapter 不変」と両立しないため別タスク）。
+
+(a)+(b) が揃えば `wezterm connect org-mux` で人間がいつでも GUI を attach し、組織サイクルを覗ける（= #540 の緊急 attach 手順）。
+本 AC（C 案）は (a)(b) いずれも行わず、headless mux + 機械観測を lab9 の担保とする。

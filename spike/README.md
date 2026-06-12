@@ -24,7 +24,7 @@
 | `mcp_smoke_test.py` | MCP プロトコル層の合成クライアント検証 (Claude 不要・無課金、backend 非依存) |
 | `run_ac2.py` | AC-2 (起動・接続チェーン) 自動検証。`--backend {wezterm,tmux}` |
 | `run_ac1.py` | AC-1 のうち自動 3 状態 (idle / 長文入力中 / ストリーミング中) の自動判定。`--backend {wezterm,tmux}` |
-| `run_ac9.py` | **AC-9 (WezTerm backend 実機 AC, Issue #9)**。実 WezTermAdapter で 6 面 + ライフサイクル + イベント + 画面状態観測 + 1 サイクルを実機往復 (無課金 probe)。`py -3 run_ac9.py`。証跡は [`ac9-wezterm-evidence.md`](./ac9-wezterm-evidence.md) |
+| `run_ac9.py` | **AC-9 (WezTerm backend 実機 AC, Issue #9)**。実 WezTermAdapter で 6 面 + ライフサイクル + イベント + 画面状態観測 + 1 サイクルを実機往復 (無課金 probe)。接続先は **headless `wezterm-mux-server`** で **GUI ウィンドウは出ない** (= tmux と同格。可視化条件は [`ac9-wezterm-evidence.md`](./ac9-wezterm-evidence.md) §5 / #540)。`py -3 run_ac9.py` |
 | `wezterm_probe.py` | AC-9 用の無課金 probe。実 WezTerm pane で claude 2.1.168 較正描画 (idle / 承認待ち / busy) を再現し、inspect→classify を実 get-text で成立させる (実 Claude 不起動) |
 | `ac9-wezterm-evidence.md` | AC-9 の Issue #9 成果物。geometry defect 発見経緯・修正・通過証跡・argv attestation・tmux 差分表 |
 | `manual-ime-test.md` | AC-1 状態 2 (IME 変換中) の手動テスト手順書 (broker ナッジ注入の輸送層検証) |
@@ -58,7 +58,7 @@ python run_ac1.py --backend tmux   # AC-1 自動 3 状態
 python tmux_adapter.py             # tmux adapter の無課金自己診断 (cat を spawn)
 
 # --- Windows (WezTerm) — PowerShell では py -3 ---
-py -3 run_ac2.py --backend wezterm # AC-2: 新規 WezTerm ウィンドウに spawn
+py -3 run_ac2.py --backend wezterm # AC-2: headless mux に spawn (GUI ウィンドウは出ない)
 py -3 run_ac1.py --backend wezterm # AC-1 自動 3 状態
 py -3 run_ac9.py                   # AC-9: WezTerm backend 実機 AC (6 面+1 サイクル, 無課金 probe)
 
@@ -107,6 +107,8 @@ py -3 manual_ime_session.py
 - broker は OS が割り当てる空きポート (port=0) で起動し、固定ポートを占有しない。
 - 書き込みは `spike/broker-state/` のみ。本体の `.state/` / state.db には触れない。
 - 検証 pane は隔離環境に spawn し、既存の renga 組織ペインには触れない
-  (adapter は自分が spawn した pane_id のみ操作する)。WezTerm は新規ウィンドウ、
+  (adapter は自分が spawn した pane_id のみ操作する)。WezTerm は headless mux 上の
+  新規 **論理**ウィンドウ (`cli spawn --new-window`。GUI ウィンドウは画面に出ない。
+  詳細 [`ac9-wezterm-evidence.md`](./ac9-wezterm-evidence.md) §5 / #540)、
   tmux は専用 socket (`-L claude-org-spike`) 上の新規 detached session を使い、
   既存 tmux サーバーとも分離する。
