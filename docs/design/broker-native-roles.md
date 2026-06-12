@@ -2,7 +2,7 @@
 
 > **status / 位置付け**: design only。Epic #6（renga 依存解消 / Plan B）の挙動層設計。`docs/design/ja-migration-plan.md` の **§5.2(ii)（静的 prose の両系併記）** と **§8 Issue E（ja prose + 契約改訂）** が「受信モデル（push→pull）の prose を両系併記する」と宣言した、その **prose の中身（受信 cadence と役割セマンティクス）を再導出する** 文書。§5 は ja 改変を「1 flag + 1 生成系シーム」に閉じる *静的シーム* の SoT であり、本書はそのシームを通過する *挙動* の SoT。両者は **概ね直交** する（例外: §6.3 D1 の descriptor フィールド追加だけは §5.2(i) 静的シームに接する。§7 で整合と反対仮説の反証を明記）。
 >
-> **入力**: (1) transport-lab Issue #16 本文、(2) suisya-systems/claude-org-ja#515 の dogfood 実走観測コメント（2026-06-13、flag=broker で委譲サイクル実走中に観測された defect 1〜4 + transport 非依存の #5→ja#554）。
+> **入力**: (1) transport-lab Issue #16 本文、(2) suisya-systems/claude-org-ja#515 の dogfood 実走観測コメント（2026-06-13、flag=broker で委譲サイクル実走中に観測された defect 1〜4 + transport 非依存の #5→ja#554）、(3) 窓口追加観測（2026-06-13）: broker tmux adapter の key 語彙制限（Escape 不可）による **介入層 defect**（§3.5）。
 >
 > **不可触制約**: 本タスクは設計のみ。production claude-org-ja / runtime 挙動 / GitHub への書込は行わない。本書は transport-lab worktree 内の設計 doc 追加と、`ja-migration-plan.md` への相互参照ポインタ追記に閉じる。ja への実反映は §6 の変更一覧として分解し、人間ゲート後に窓口/ユーザー判断で行う。
 
@@ -104,6 +104,30 @@ secretary は **人間対話主体** で、応答性を保つため **blocking �
 - これは **adapter（runtime）層** の変更で、design-only の本書ではスコープ外実装。§8 Issue A（`claude_org_runtime/terminal/` への terminal 抽出）に **adapter のセッション構成方針** として載せる（§6 表 R1）。
 - dogfood で knowledge/raw に記録済の視認性トレードオフ（「detached spawn で常時視認が消える ↔ 画面サイズからの解放」）と整合: 単一セッション化は **常時視認を強制せず attach 時の観察性を回復** する（detached の画面解放は維持）。
 
+### 3.5 追加 defect（介入層）— broker tmux adapter の key 語彙制限で Escape 介入が実行不能
+
+**観測（窓口 2026-06-13 追加）**: broker の tmux アダプタは `send_keys` の raw キー語彙が限定されており、**Escape が送れない**（`[key_unsupported]`。**Enter / Ctrl+C / literal text のみ**サポート、full 語彙は Phase 4 / full backend adapter とのエラーメッセージ）。これにより org-delegate の **worker 介入手順**（`org-delegate/SKILL.md` L326: `inspect_pane` で深掘り確認 → **`send_keys(keys=["Escape"])` で中断** → tight な修正指示送信）が broker では **実行不能**。Shift+Tab（permission mode 切替、`renga-error-codes.md` L172）も同様に未サポートの隣接 gap。
+
+**根因**: defect 1〜3 とは別系統 — push→pull ではなく **adapter primitive の語彙不足**（renga-decoupling.md §4.2 の「adapter 面を薄く保つ」方針 / §7.4 Phase 4 full backend adapter への意図的 defer）と、**Escape ベースの介入手順が hard-depend する renga 役割 prose** の衝突。ja-migration-plan §3.2-4「構造的相違・欠落（設計判断が要る）」の介入版。
+
+**Ctrl+C 安全性評価（窓口の明示要求）**: Claude Code TUI のキー意味論で **Escape と Ctrl+C は等価でない**:
+
+| キー | 意味論 | 介入用途での安全性 |
+|---|---|---|
+| **Escape**（renga 介入の正準） | 生成中ターンを **graceful に中断**、コンテキスト・入力を保持してプロンプトへ復帰 | ◎ 「暴走を止めて指示し直す」に最適。冪等的に再送可 |
+| **Ctrl+C**（broker でサポート） | 単発で現行入力/生成を中断するが、**2 回連続で Claude が exit**（= worker session 喪失）。入力欄が非空なら生成中断ではなく入力 clear になりうる | △ **非冪等**（ナッジの冪等性契約と真逆）。再送/二重打鍵が **session 破壊**。意味が Escape より粗い |
+
+→ **Ctrl+C は「緊急停止」としては使えるが、Escape の drop-in 代替にはならない**（非冪等・session 破壊リスク・粒度差）。
+
+**設計（2 horizon）**:
+
+1. **正準（推奨）— broker tmux adapter の key 語彙に Escape（+ Shift+Tab）を追加**: tmux は `send-keys Escape` を**ネイティブにサポート**するため、これは小さな adapter 補完で、renga の Escape ベース介入手順を **drop-in 不変** にできる（§3.3 の「形寄せ / drop-in」哲学・renga-decoupling.md §3.1 の surface parity と整合。Ctrl+C hazard を完全回避）。**Issue A（terminal adapter）+ Issue C（surface parity）** に載せる。Phase 4 full backend adapter の語彙拡張を、介入に必要な Escape/Shift+Tab に限って前倒しする位置づけ。
+2. **暫定 fallback（語彙拡張前）— gated single Ctrl+C + pull-native idle redirect**:
+   - **暴走生成の緊急停止**: `inspect_pane`/grid scrape で worker が **実際に生成中（スピナー有・shell プロンプトでない）** を pre-check → **Ctrl+C を厳密に 1 回だけ**送信（**再送・二重打鍵を adapter/retry 層が構造的に禁止** — ナッジと逆で Ctrl+C は非冪等）→ post-check で **session 生存**（pane 登録維持・プロンプト復帰・shell へ落ちていない）を確認、死んでいれば **人間へエスカレート**（session 喪失は respawn + 再委譲が必要・自動回復不可）→ tight 修正指示を literal text + Enter で送る。
+   - **非暴走（idle）redirect**: worker がターン間 idle なら中断不要。修正指示の届け方は 2 経路を区別する: **(正準) pull** — `send_message` で broker queue に積み、worker が次のターン境界 poll（§2 worker (a-1)）で受領（PTY を使わない・poll 正準を保つ）。**(打鍵起こし、任意)** — idle worker を即時に動かしたい場合のみ、最小の literal text + Enter（語彙内の PTY push）で `check_messages` 起動を打鍵する（これは §3.1-C の打鍵 accelerator と同類で、idle worker は割り込み安全。**指示本文は PTY に流さず queue に積む** — 本文 PTY 混線を避ける §4.3 の原則）。Escape も Ctrl+C も使わない。
+
+**既定 renga 不変**: renga の send_keys は Escape/Shift+Tab を従来どおり持つ（語彙不変）。本 defect の対処はすべて **broker 枝・adapter 加算**で、renga 介入手順 prose は不変（broker 枝に「Escape→語彙追加後 drop-in / 暫定は gated Ctrl+C」の条件分岐を併記）。
+
 ---
 
 ## 4. 既定 renga 経路の不変性（設計保証）
@@ -111,7 +135,7 @@ secretary は **人間対話主体** で、応答性を保つため **blocking �
 受け入れ条件「既定 renga 経路の不変性」を以下で構造保証する:
 
 1. **すべて broker 枝に閉じる**: §2 の pull cadence、§3.1 の poll baseline、§3.3 の /loop 実発火 prose（`.dispatcher/CLAUDE.md` 監視エントリの broker 枝）、§2 worker の完了後 review-watch /loop、§3.2 B1 のターン冒頭 poll は、いずれも **`ORG_TRANSPORT=broker` 条件下の broker 枝**（§5.2(ii) 両系併記の broker 側）に書く。renga 枝の「in-band push → 即応答」prose は **一字も変えない**。
-2. **加算のみ**: §3.2 B2（attention sidecar のキュー拡張）と §3.4（tmux 単一セッション）は **broker transport 選択時のみ作動する加算**。renga 時は watcher も adapter も現状経路。renga ツール（`mcp__renga-peers__*`）は 1 つも失われない。
+2. **加算のみ**: §3.2 B2（attention sidecar のキュー拡張）・§3.4（tmux 単一セッション）・§3.5（adapter key 語彙への Escape 追加 / 介入 prose の broker 枝）は **broker transport 選択時のみ作動する加算**。renga 時は watcher も adapter も現状経路、renga の send_keys は Escape/Shift+Tab を従来どおり保持。renga ツール（`mcp__renga-peers__*`）は 1 つも失われない。
 3. **flag 既定は不変**: 本書は **挙動層の prose/cadence のみ** を扱い、`ORG_TRANSPORT` の既定値（移行期=renga、§5.1）は **変えない**。既定反転は §8 Issue G ゲート後の人間判断のままで、本書はそれを前倒ししない。
 4. **切戻し忠実性**: §5.5 の切戻し 5 条件は本書の変更で増えない。broker 枝 prose は flag=renga 再生成時に renga 枝へ戻るだけ（生成系シーム §5.2(i) が両系を render するため、prose の broker 枝は flag で非選択になる）。
 
@@ -151,6 +175,8 @@ secretary は **人間対話主体** で、応答性を保つため **blocking �
 |---|---|---|---|---|---|
 | **S2** | sidecar + runtime | attention watcher（`org-attention-start` SKILL + `claude-org-runtime attention watch` の `attention/readers.py` + `attention.example.json` テンプレ） | **readers.py に broker-queue poll source を新設**（現状 readers.py は state.db events + pending_decisions.json のみ読み、queue read 経路を持たない＝**net-new reader 配線**。sidecar 骨格＝pane 常駐・通知 backend・dedup は再利用）。worker 完了 / dispatcher DELEGATED / escalation 着信で attention を上げる。watcher 起動時に secretary read-scope の broker token を渡す導線。**真に埋める gap = secretary 未処理（state.db 未書込）の着信報告 / escalation / DELEGATED**（処理後 state.db 経路とは一部重複しうる）。transport-aware（renga 時は無効化、加算） | E（prose 起動）+ **Issue H（watcher input 拡張 = readers.py の新 source + token ハンドリング。ja-migration-plan §8 に新設、A の terminal 抽出とは独立）** | 2 |
 | **R1** | runtime（terminal adapter） | `claude_org_runtime/terminal/`（tmux adapter） | **tmux アダプタを単一セッション複数ペイン構成へ再構成**（`claude-org` セッション、attach 一発で全体）。attach 導線を runbook 化 | **A**（terminal 抽出） | 4 |
+| **R2** | runtime（terminal adapter） | broker tmux adapter の key 語彙（`send_keys` キーマップ） | **key 語彙に `Escape`（+ `Shift+Tab`）を追加**（tmux は `send-keys Escape` をネイティブ対応）。renga の Escape ベース介入手順を drop-in 不変にし Ctrl+C hazard を回避（§3.5 正準。Phase 4 full 語彙のうち介入必須分を前倒し） | **A**（terminal 抽出）+ **C**（surface parity） | 介入層 |
+| **P7** | prose | `.claude/skills/org-delegate/SKILL.md` L326 介入手順 + `renga-error-codes.md` broker 節 | 介入手順に broker 枝を併記: **Escape は R2 で語彙追加後 drop-in / 暫定は gated single Ctrl+C**（生成中 pre-check → 厳密 1 回・再送禁止 → session 生存 post-check → 死亡時エスカレート）+ idle redirect は pull 受信で。`renga-error-codes.md` に broker の限定語彙（Enter/Ctrl+C/literal のみ・`[key_unsupported]`）と Ctrl+C 非冪等の注意を追記 | **E** | 介入層 |
 | **N1** | runtime（任意・低優先） | broker nudge accelerator | 打鍵ナッジ accelerator の spike（poll 正準のまま同 path に低遅延補助）。**3m gap 不足が実測された時のみ着手**。secretary 除外 | **Issue H（N1 部）**（ja-migration-plan §8、F と同列の独立・低優先） | 1 |
 
 ### 6.3 生成系 descriptor 層（→ §8 Issue D: ja 統合シーム）
@@ -159,7 +185,7 @@ secretary は **人間対話主体** で、応答性を保つため **blocking �
 |---|---|---|---|
 | **D1** | transport surface descriptor（§5.2(i)、runtime） | descriptor に **`receive_mode`（`"push"`/`"poll"`）と役割別 `receive_cadence` ヒント**（worker=turn-boundary+review-watch-loop / dispatcher=loop-3m / secretary=turn-prologue+sidecar）を加算フィールドとして持たせ、両生成器が prose render 時に broker 枝の cadence 文言を descriptor 駆動で出せるようにする（drift 防止）。golden test に追加。**— descriptor の `receive_mode` は新概念ではなく、backend-interface-contract.md §8.8（§1.5/§2.2 amend、broker では定数 `"poll"`、批准待ち）が規定する `list_panes`/`list_peers` 出力フィールド `receive_mode` の *上流 SoT* である**。同一の flag 由来値（renga→`push` / broker→`poll`）が (1) broker 枝 prose の cadence render と (2) 当該出力レコードフィールドの双方へ流れる単一 SoT とし、descriptor を rename しない（批准待ちフィールド名 `receive_mode` を ja 生成器が emit する整合を保つため）。§5.2(i) の「両生成器出力 == descriptor の golden test」に出力フィールド一致も含める | 1,2,3 |
 
-> **粒度の所在**: P1/P2/P3a/P3b/P4/P5/P6 は **prose（Issue E）**、S2 は **prose 起動（E）+ runtime watch 実装（Issue H）**、R1 は **runtime terminal adapter（Issue A）**、N1 は **任意 spike（Issue H の N1 部、F 同列）**、D1 は **descriptor（Issue D）**。挙動層の中心質量（受信 cadence prose）は Issue E に集中し、§5.6 の「worker/curator は messaging 4 ツール + 受信モデル prose のみ」という配線替え集中と整合する。ja-migration-plan §8 の Issue 表に A（+R1）/ D（+D1）/ E（+P1-P6, S2 prose）/ H（新設: S2 runtime + N1）として反映済。
+> **粒度の所在**: P1/P2/P3a/P3b/P4/P5/P6/P7 は **prose（Issue E）**、S2 は **prose 起動（E）+ runtime watch 実装（Issue H）**、R1/R2 は **runtime terminal adapter（Issue A、R2 は C surface parity も）**、N1 は **任意 spike（Issue H の N1 部、F 同列）**、D1 は **descriptor（Issue D）**。挙動層の中心質量（受信 cadence prose）は Issue E に集中し、§5.6 の「worker/curator は messaging 4 ツール + 受信モデル prose のみ」という配線替え集中と整合する。ja-migration-plan §8 の Issue 表に A（+R1, +R2）/ C（+R2 parity）/ D（+D1）/ E（+P1-P7, S2 prose）/ H（新設: S2 runtime + N1）として反映済。
 
 ---
 
@@ -193,4 +219,5 @@ secretary は **人間対話主体** で、応答性を保つため **blocking �
 
 - 2026-06-13: 初版（design only / Refs #16）。transport-lab Issue #16 と ja#515 dogfood コメント（2026-06-13、defect 1〜4）を入力に、push→pull の挙動層を broker-native に再導出。受信モデルを **pull-first cadence**（役割別: worker=turn-boundary / dispatcher=loop-3m / secretary=turn-prologue+sidecar）として一次設計。nudge は **poll 正準 + 打鍵 accelerator defer**（§6.3 reconcile と同型、推奨 C）。defect 1（nudge wakeup）/2（secretary 受信ループ= B1 ターン冒頭 poll + B2 attention sidecar 拡張）/3（dispatcher /loop 実発火）/4（tmux 単一セッション再構成）に各々設計上の対処を明記。既定 renga 経路の不変性を 4 点で構造保証。ja 反映変更一覧（P1 / P2 / P3a / P3b / P4 / P5 / P6 / S2 / R1 / N1 / D1）を層別・§8 Issue 別に分解。**重要な発見**: 第 1 次 prose pass（org-delegate L42 / org-start L56）が「ナッジを見たら」という push 残留仮定を broker 枝に持ち込んでおり、これを pull-first へ修正（P1/P3a）。新規 doc 採用判断（§5 は静的シーム SoT、本書は挙動層 SoT、概ね直交）。
   - **同日 adversarial design review（4 lens × 検証、Blocker 1 / Major 7 を反映）**: (1) **[Blocker]** worker 完了後レビュー待機が defect 3 を worker に再発させる no-re-entry gap だったため、§2 worker を 2 フェーズ化（実行中=ターン境界 poll / 完了後=bounded `/loop Nm` 実発火）し P1/P5/§8 を整合（§3.3 dispatcher と同型）。(2) **[Major]** defect 3 の /loop 修正対象を **org-start Block D → `.dispatcher/CLAUDE.md` L121/L134** に是正（org-start に /loop は無い・secretary は dispatcher session で /loop を invoke 不可。grep 検証付き）。P3 を P3a（org-start L56 / defect 1）と P3b（dispatcher / defect 3）に分割。(3) **[Major]** §1/§2 の「`receive_mode` 定数が既存」表現を「broker は構造的 pull・`receive_mode="poll"` は §8.8 contract amendment / D1 提案で未実装」に是正。(4) **[Major]** D1 の `receive_mode` が既存 contract 出力フィールド（backend-interface-contract §8.8）と同名のため、descriptor を *上流 SoT* とする linkage を明記（rename しない）。(5) **[Major]** S2「新規インフラ不要・既存 sidecar 再利用」は誤り（`attention/readers.py` は queue read 経路を持たない）→「sidecar 骨格は再利用だが reader 入力は net-new」に是正し独立 runtime Issue 化。(6) **[Major→partial]** §7 に反対仮説（§5.2(ii).a 小節へ畳む案）の明示と反証を追加、「直交」を「概ね直交」に緩和。(7) **[Major→partial]** §3.2 に B2 の被覆範囲（通知のみ・agent は起こさない・人間不在 ack 遅延は次の人間ターンに bound・#312 遷移条件は不変で dispatcher 機械観測が backstop）を明示。
+- 2026-06-13: **追加 defect（介入層）を反映（窓口追加観測 / Refs #16）**。broker tmux adapter の `send_keys` key 語彙制限（**Escape 不可** = `[key_unsupported]`、Enter/Ctrl+C/literal のみ）で org-delegate の Escape ベース worker 介入手順が実行不能、を §3.5 に追加。**Ctrl+C 安全性評価**: Escape（graceful 中断・冪等再送可）と Ctrl+C（非冪等・2 回で Claude exit = session 喪失・粒度粗）は等価でないと結論。**設計 2 horizon**: 正準 = adapter key 語彙に Escape/Shift+Tab 追加（tmux ネイティブ・drop-in 不変、R2 → Issue A+C）/ 暫定 = gated single Ctrl+C（生成中 pre-check・厳密 1 回再送禁止・session 生存 post-check・死亡時エスカレート）+ idle redirect は pull 受信。変更一覧に R2（adapter 語彙）/ P7（介入 prose broker 枝 + renga-error-codes 注記）を追加。既定 renga の介入手順・send_keys 語彙は不変（broker 枝 adapter 加算）。
   - **Codex セルフレビューゲート（full、Blocker/Major ゼロまで収束）での追加是正**: (i) §8 Issue 表に S2 runtime / N1 の所在が無く R1 が Issue A scope 外だったため、ja-migration-plan §8 に **Issue H 新設**（S2 watcher input 拡張 + N1 nudge accelerator）+ **Issue A に R1**（tmux 単一セッション化）+ **Issue D に D1**（receive_mode descriptor）を反映。(ii) ja-migration-plan §3.2 / renga-decoupling §7.1 受信モデル節の旧「ナッジを見たら」を pull-first 文言へ修正。(iii) renga-decoupling **§4.3 / §7.1 AC-1 / §7.3** がナッジを正準配送路・Phase 3 必須完了条件として扱っていた矛盾を、**ナッジ=任意 accelerator（N1）へ降格・正準=pull-first cadence** の再定義注記で解消（AC-1 は IME 非破壊の実証であり「idle を起こす」ことは実証しない、と射程を明示）。
