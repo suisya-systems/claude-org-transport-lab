@@ -277,11 +277,13 @@ def run_isolation(model: str, wake_timeout: float) -> dict:
                                 "--input-format")
                     if f in real_argv]
         idle_screen = adapter.get_text(pane.pane_id)
+        prompt_rendered = "❯" in idle_screen or ">" in idle_screen
         result["ac4_billing_neutral"] = {
             "real_argv": real_argv,
             "headless_flags_present": headless,
-            "interactive_prompt_rendered": "❯" in idle_screen or ">" in idle_screen,
-            "pass": (len(headless) == 0 and bool(real_argv)),
+            "interactive_prompt_rendered": prompt_rendered,
+            # 課金中立 = (headless flag 不在) かつ (実 argv 取得) かつ (対話 TUI プロンプト描画)
+            "pass": (len(headless) == 0 and bool(real_argv) and prompt_rendered),
         }
         (evid / "idle-before.txt").write_text(idle_screen, encoding="utf-8")
 

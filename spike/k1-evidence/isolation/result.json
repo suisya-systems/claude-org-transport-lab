@@ -3,7 +3,7 @@
   "argv": [
     "/home/happy_ryo/.local/bin/claude",
     "--mcp-config",
-    "/tmp/k1-iso-9c6m47md/mcp-config.json",
+    "/tmp/k1-iso-x5nugwxu/mcp-config.json",
     "--strict-mcp-config",
     "--dangerously-load-development-channels",
     "server:org-broker-channel",
@@ -16,7 +16,7 @@
     "dev_channel_prompt": true,
     "mcp_approve_prompt": false,
     "approved_mechanically": true,
-    "ready_seconds": 3.3,
+    "ready_seconds": 4.4,
     "prompt_texts": [
       {
         "kind": "dev_channel_prompt",
@@ -30,7 +30,7 @@
     "real_argv": [
       "/home/happy_ryo/.local/bin/claude",
       "--mcp-config",
-      "/tmp/k1-iso-9c6m47md/mcp-config.json",
+      "/tmp/k1-iso-x5nugwxu/mcp-config.json",
       "--strict-mcp-config",
       "--dangerously-load-development-channels",
       "server:org-broker-channel",
@@ -42,8 +42,8 @@
     "pass": true
   },
   "probe": {
-    "base": "b32c12b7",
-    "target": "B32C12B7"
+    "base": "07072c49",
+    "target": "07072C49"
   },
   "ac2_idle_wake": {
     "transform_target_emitted_by_model": true,

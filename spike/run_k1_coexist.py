@@ -45,6 +45,16 @@ OWNER = "claude-spike"
 LIVE_PEERS_DB = str(Path.home() / ".claude-peers.db")  # 本番 (不可触)
 
 
+def _free_port() -> int:
+    """空きポートを 1 つ確保して返す（固定ポート衝突を避ける）。"""
+    import socket
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    p = s.getsockname()[1]
+    s.close()
+    return p
+
+
 def _peers_post(port, token, path, payload):
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}{path}",
@@ -67,62 +77,75 @@ def run_coexist(model: str, wake_timeout: float) -> dict:
     # --- machine-level isolation baseline: 本番 db の mtime を採取 ---
     live_mtime_before = os.path.getmtime(LIVE_PEERS_DB) if os.path.exists(LIVE_PEERS_DB) else None
 
-    # --- (1) 隔離 claude-peers broker (実 prior art) ---
-    bun = str(Path.home() / ".bun/bin/bun")
-    peers_port = "47711"
-    peers_db = str(state / "peers.db")
-    peers_token_path = str(state / "peers-token")
-    peers_env = dict(os.environ,
-                     CLAUDE_PEERS_PORT=peers_port,
-                     CLAUDE_PEERS_DB=peers_db,
-                     CLAUDE_PEERS_TOKEN_PATH=peers_token_path,
-                     PATH=f"{Path.home()}/.bun/bin:" + os.environ.get("PATH", ""))
-    broker_log = open(state / "peers-broker.log", "w")
-    broker_proc = subprocess.Popen([bun, "run", f"{PRIOR_ART}/broker.ts"],
-                                   stdout=broker_log, stderr=subprocess.STDOUT,
-                                   env=peers_env)
-    time.sleep(2.5)
-    peers_token = Path(peers_token_path).read_text().strip()
-    log(f"isolated claude-peers broker up on :{peers_port} (db={peers_db})")
-
-    # --- (2) 本 spike daemon ---
-    srv = DaemonServer(state, lease_seconds=5.0)
-    srv.start()
-    delivery_cred = srv.daemon.issue_cred(OWNER, "delivery")
-    log(f"k1 daemon up at {srv.url}")
-
+    broker_log = None
+    broker_proc = None
+    srv = None
+    pane = None
+    scratch = None
     adapter = TmuxAdapter()
-    scratch = Path(tempfile.mkdtemp(prefix="k1-coexist-"))
-    sidecar_log = str(state / "sidecar.log")
-    mcp_cfg = {"mcpServers": {
-        "org-broker-channel": {
-            "command": sys.executable, "args": [SIDECAR],
-            "env": {"K1_DAEMON_URL": srv.url, "K1_DELIVERY_CRED": delivery_cred,
-                    "K1_OWNER": OWNER, "K1_POLL_INTERVAL": "1.0",
-                    "K1_SOURCE_NAME": "org-broker-channel",
-                    "K1_SIDECAR_LOG": sidecar_log}},
-        "claude-peers": {
-            "command": bun, "args": ["run", f"{PRIOR_ART}/server.ts"],
-            "env": {"CLAUDE_PEERS_PORT": peers_port, "CLAUDE_PEERS_DB": peers_db,
-                    "CLAUDE_PEERS_TOKEN_PATH": peers_token_path,
-                    "PATH": f"{Path.home()}/.bun/bin:" + os.environ.get("PATH", ""),
-                    "HOME": os.environ.get("HOME", "")}},
-    }}
-    cfg_path = scratch / "mcp-config.json"
-    cfg_path.write_text(json.dumps(mcp_cfg), encoding="utf-8")
-
-    claude = shutil.which("claude")
-    argv = [claude, "--mcp-config", str(cfg_path), "--strict-mcp-config",
-            "--dangerously-load-development-channels",
-            "server:org-broker-channel", "server:claude-peers",
-            "--model", model]
-    log(f"spawn (both channels): {' '.join(argv)}")
-    t0 = time.monotonic()
-    pane = adapter.spawn(argv, cwd=str(scratch), new_window=True)
-    result["argv"] = argv
-    result["pane"] = pane.pane_id
-
     try:
+        # --- (1) 隔離 claude-peers broker (実 prior art。空きポートで衝突回避) ---
+        bun = str(Path.home() / ".bun/bin/bun")
+        peers_port = str(_free_port())
+        peers_db = str(state / "peers.db")
+        peers_token_path = str(state / "peers-token")
+        peers_env = dict(os.environ,
+                         CLAUDE_PEERS_PORT=peers_port,
+                         CLAUDE_PEERS_DB=peers_db,
+                         CLAUDE_PEERS_TOKEN_PATH=peers_token_path,
+                         PATH=f"{Path.home()}/.bun/bin:" + os.environ.get("PATH", ""))
+        broker_log = open(state / "peers-broker.log", "w")
+        broker_proc = subprocess.Popen([bun, "run", f"{PRIOR_ART}/broker.ts"],
+                                       stdout=broker_log, stderr=subprocess.STDOUT,
+                                       env=peers_env)
+        # token file が書かれるまで poll（固定 sleep より堅牢）
+        peers_token = None
+        for _ in range(30):
+            if Path(peers_token_path).exists():
+                peers_token = Path(peers_token_path).read_text().strip()
+                if peers_token:
+                    break
+            time.sleep(0.2)
+        if not peers_token:
+            raise RuntimeError("isolated claude-peers broker did not start (no token file)")
+        log(f"isolated claude-peers broker up on :{peers_port} (db={peers_db})")
+
+        # --- (2) 本 spike daemon ---
+        srv = DaemonServer(state, lease_seconds=5.0)
+        srv.start()
+        delivery_cred = srv.daemon.issue_cred(OWNER, "delivery")
+        log(f"k1 daemon up at {srv.url}")
+
+        scratch = Path(tempfile.mkdtemp(prefix="k1-coexist-"))
+        sidecar_log = str(state / "sidecar.log")
+        mcp_cfg = {"mcpServers": {
+            "org-broker-channel": {
+                "command": sys.executable, "args": [SIDECAR],
+                "env": {"K1_DAEMON_URL": srv.url, "K1_DELIVERY_CRED": delivery_cred,
+                        "K1_OWNER": OWNER, "K1_POLL_INTERVAL": "1.0",
+                        "K1_SOURCE_NAME": "org-broker-channel",
+                        "K1_SIDECAR_LOG": sidecar_log}},
+            "claude-peers": {
+                "command": bun, "args": ["run", f"{PRIOR_ART}/server.ts"],
+                "env": {"CLAUDE_PEERS_PORT": peers_port, "CLAUDE_PEERS_DB": peers_db,
+                        "CLAUDE_PEERS_TOKEN_PATH": peers_token_path,
+                        "PATH": f"{Path.home()}/.bun/bin:" + os.environ.get("PATH", ""),
+                        "HOME": os.environ.get("HOME", "")}},
+        }}
+        cfg_path = scratch / "mcp-config.json"
+        cfg_path.write_text(json.dumps(mcp_cfg), encoding="utf-8")
+
+        claude = shutil.which("claude")
+        argv = [claude, "--mcp-config", str(cfg_path), "--strict-mcp-config",
+                "--dangerously-load-development-channels",
+                "server:org-broker-channel", "server:claude-peers",
+                "--model", model]
+        log(f"spawn (both channels): {' '.join(argv)}")
+        t0 = time.monotonic()
+        pane = adapter.spawn(argv, cwd=str(scratch), new_window=True)
+        result["argv"] = argv
+        result["pane"] = pane.pane_id
+
         idle, obs = approve_prompts_until_idle(adapter, pane.pane_id, t0,
                                                evidence_dir=evid, timeout=140.0)
         result["startup"] = obs
@@ -171,8 +194,7 @@ def run_coexist(model: str, wake_timeout: float) -> dict:
             time.sleep(1.0)
         after = adapter.get_text(pane.pane_id)
         (evid / "coexist-after.txt").write_text(after, encoding="utf-8")
-        write_committed_evidence("coexist", after, result,
-                                 [probe_a["target"], probe_b["target"]])
+        # committed evidence は result 完成後に main() で書く（pass/wake/mtime を含めるため）
 
         result["ac3_coexist"] = {
             # 両 channel がモデルを実際に起こした（transform 出力で実証）
@@ -195,14 +217,19 @@ def run_coexist(model: str, wake_timeout: float) -> dict:
         }
         return result
     finally:
-        try:
-            adapter.kill_pane(pane.pane_id)
-        except Exception:
-            pass
-        broker_proc.terminate()
-        broker_log.close()
-        srv.stop()
-        shutil.rmtree(scratch, ignore_errors=True)
+        if pane is not None:
+            try:
+                adapter.kill_pane(pane.pane_id)
+            except Exception:
+                pass
+        if broker_proc is not None:
+            broker_proc.terminate()
+        if broker_log is not None:
+            broker_log.close()
+        if srv is not None:
+            srv.stop()
+        if scratch is not None:
+            shutil.rmtree(scratch, ignore_errors=True)
 
 
 def main() -> int:
@@ -215,6 +242,12 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "result.json").write_text(
         json.dumps(res, indent=2, ensure_ascii=False), encoding="utf-8")
+    # committed durable evidence（result 完成後・PII 除去）
+    after_path = out_dir / "coexist-after.txt"
+    after = after_path.read_text(encoding="utf-8") if after_path.exists() else ""
+    targets = [res.get("probe_a", {}).get("target", ""), res.get("probe_b", {}).get("target", "")]
+    committed = write_committed_evidence("coexist", after, res, [t for t in targets if t])
+    print(f"committed evidence: {committed}")
     print(json.dumps(res, indent=2, ensure_ascii=False))
     ac3 = (res.get("ac3_coexist") or {}).get("pass")
     print(f"\nAC3 (coexist with renga-equivalent): {'PASS' if ac3 else 'FAIL'}")

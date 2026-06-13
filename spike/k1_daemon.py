@@ -164,6 +164,12 @@ class Daemon:
                 return {"ok": False, "error": "stale_epoch", "epoch": self.epoch}
             if row.state == DELIVERED:
                 return {"ok": True, "idempotent": True}   # 冪等
+            # §9.3 不変条件: confirm は **live な claim** に紐づくことを daemon が強制する。
+            # 未 claim(UNDELIVERED) / lease reap 後 / 別 owner・別 epoch の claim を確定できない。
+            if (row.state != CLAIMED or row.owner != cred.owner
+                    or row.claim_epoch != epoch):
+                return {"ok": False, "error": "not_claimed",
+                        "state": row.state, "owner": row.owner}
             row.state = DELIVERED
             self._journal("delivered", id=rid, owner=cred.owner)
             return {"ok": True}

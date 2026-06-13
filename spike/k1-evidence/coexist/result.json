@@ -3,7 +3,7 @@
   "argv": [
     "/home/happy_ryo/.local/bin/claude",
     "--mcp-config",
-    "/tmp/k1-coexist-sihz0oq5/mcp-config.json",
+    "/tmp/k1-coexist-kwcdvltx/mcp-config.json",
     "--strict-mcp-config",
     "--dangerously-load-development-channels",
     "server:org-broker-channel",
@@ -28,11 +28,24 @@
   },
   "claude_peers_target_registered": true,
   "probe_a": {
-    "base": "592d9b05",
-    "target": "592D9B05"
+    "base": "79a65239",
+    "target": "79A65239"
   },
   "probe_b": {
-    "base": "b31db427",
-    "target": "B31DB427"
+    "base": "4d6cf4f8",
+    "target": "4D6CF4F8"
+  },
+  "ac3_coexist": {
+    "channel_A_org_broker_woke": true,
+    "channel_B_claude_peers_woke": true,
+    "both_sources_loaded_and_injected": true,
+    "neither_blocked": true,
+    "pass": true
+  },
+  "machine_isolation": {
+    "live_peers_db": "/home/happy_ryo/.claude-peers.db",
+    "live_db_mtime_unchanged": true,
+    "isolated_db_used": "/tmp/claude/broker-k1-spike/coexist/peers.db",
+    "note": "broker push path (isolated port/db) does not touch live renga db"
   }
 }

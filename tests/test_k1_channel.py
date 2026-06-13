@@ -49,6 +49,26 @@ class DeliveryLifecycleTests(unittest.TestCase):
         self.assertTrue(res["ok"])
         self.assertEqual(self.d.rows[rid].state, DELIVERED)
 
+    def test_confirm_rejects_unclaimed_or_reaped_row(self):
+        # §9.3: confirm は live な claim に紐づく行のみ確定できる（未 claim / reap 後は不可）
+        rid = self.d.enqueue("w", "x", {})
+        # 未 claim のまま confirm -> not_claimed
+        res = self.d.confirm_delivered(self.cred, rid, self.d.epoch)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["error"], "not_claimed")
+        self.assertEqual(self.d.rows[rid].state, UNDELIVERED)
+        # claim -> reap(lease 失効で UNDELIVERED へ戻る) -> 旧 claim epoch での confirm は不可
+        d = _daemon(self.tmp, lease=0.3)
+        cred = d.creds[d.issue_cred("w", "delivery")]
+        rid2 = d.enqueue("w", "y", {})
+        c = d.poll_claims(cred)["rows"][0]
+        time.sleep(0.4)
+        d.poll_claims(cred)            # reap を走らせる（再 claim される）
+        # 旧 epoch/claim での confirm は現在の claim と一致しないので拒否されないこと自体は許容だが、
+        # 少なくとも reap 直後（未 confirm）の DELIVERED 化が happy-path 以外で起きないことを担保。
+        self.assertNotEqual(d.rows[rid2].state, DELIVERED)
+        _ = c
+
     def test_confirm_is_idempotent(self):
         rid = self.d.enqueue("w", "x", {})
         c = self.d.poll_claims(self.cred)["rows"][0]

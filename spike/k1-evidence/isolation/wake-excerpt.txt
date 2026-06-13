@@ -1,8 +1,8 @@
 # K1 wake 証跡（抜粋・email 伏字）。生ダンプは実行時 /tmp/claude/broker-k1-spike に生成
-# transform targets（push 本文に存在しない＝モデル出力でのみ一致）: ['B32C12B7']
+# transform targets（push 本文に存在しない＝モデル出力でのみ一致）: ['07072C49']
 
  ▎ Channels (experimental) messages from server:org-broker-channel inject directly in this session · restart without --dangerously-load-development-channels to stop
 ← org-broker-channel: A push message arrived on channel org-broker-channel. Ackno…
-● B32C12B7
+● 07072C49
                                                                                                                                                                                                            ● high · /effort
 ❯
