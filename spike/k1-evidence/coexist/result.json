@@ -1,0 +1,51 @@
+{
+  "ac": "coexist",
+  "argv": [
+    "/home/happy_ryo/.local/bin/claude",
+    "--mcp-config",
+    "/tmp/k1-coexist-kwcdvltx/mcp-config.json",
+    "--strict-mcp-config",
+    "--dangerously-load-development-channels",
+    "server:org-broker-channel",
+    "server:claude-peers",
+    "--model",
+    "sonnet"
+  ],
+  "pane": "%0",
+  "startup": {
+    "folder_trust": false,
+    "dev_channel_prompt": true,
+    "mcp_approve_prompt": false,
+    "approved_mechanically": true,
+    "ready_seconds": 3.3,
+    "prompt_texts": [
+      {
+        "kind": "dev_channel_prompt",
+        "tail": "───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n  WARNING: Loading development channels\n  --dangerously-load-development-channels is for local channel development only. Do not use this option to run channels you have downloaded off the internet.\n  Please use --channels to run a list of approved channels.\n  Channels: server:org-broker-channel, server:claude-peers\n  ❯ 1. I am using this for local development\n    2. Exit\n  Enter to confirm · Esc to cancel"
+      }
+    ],
+    "idle_settle_frames": 2
+  },
+  "claude_peers_target_registered": true,
+  "probe_a": {
+    "base": "79a65239",
+    "target": "79A65239"
+  },
+  "probe_b": {
+    "base": "4d6cf4f8",
+    "target": "4D6CF4F8"
+  },
+  "ac3_coexist": {
+    "channel_A_org_broker_woke": true,
+    "channel_B_claude_peers_woke": true,
+    "both_sources_loaded_and_injected": true,
+    "neither_blocked": true,
+    "pass": true
+  },
+  "machine_isolation": {
+    "live_peers_db": "/home/happy_ryo/.claude-peers.db",
+    "live_db_mtime_unchanged": true,
+    "isolated_db_used": "/tmp/claude/broker-k1-spike/coexist/peers.db",
+    "note": "broker push path (isolated port/db) does not touch live renga db"
+  }
+}
