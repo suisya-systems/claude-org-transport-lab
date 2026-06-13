@@ -1,4 +1,7 @@
-# broker-native な役割要素の設計再導出 — push→pull の挙動層
+# broker-native な役割要素の設計再導出 — 受信挙動層（#16 pull-first → #18 push 一次 + pull フォールバック）
+
+<!-- 旧題: 「push→pull の挙動層」。#18（§9）で配送モデルを push 一次へ再反転したため改題。 -->
+
 
 > **status / 位置付け**: design only。Epic #6（renga 依存解消 / Plan B）の挙動層設計。`docs/design/ja-migration-plan.md` の **§5.2(ii)（静的 prose の両系併記）** と **§8 Issue E（ja prose + 契約改訂）** が「受信モデル（push→pull）の prose を両系併記する」と宣言した、その **prose の中身（受信 cadence と役割セマンティクス）を再導出する** 文書。§5 は ja 改変を「1 flag + 1 生成系シーム」に閉じる *静的シーム* の SoT であり、本書はそのシームを通過する *挙動* の SoT。両者は **概ね直交** する（例外: §6.3 D1 の descriptor フィールド追加だけは §5.2(i) 静的シームに接する。§7 で整合と反対仮説の反証を明記）。
 >
@@ -257,7 +260,8 @@ secretary は **人間対話主体** で、応答性を保つため **blocking �
 | `DELIVERED` | 配達確定（再配達しない） | `/confirm-delivered(id)` 受領で確定 |
 
 - **sidecar push = claim-then-confirm**: poll は `/poll-claims`（**claim-with-lease**: `UNDELIVERED` を選び `CLAIMED(lease=now+T, owner=sidecar credential, epoch=現 mode-epoch)` にして行を返す）→ sidecar が各行を `notifications/claude/channel` で emit → **`mcp.notification` が resolve した行だけ** `/confirm-delivered(id)` で `DELIVERED` へ。
-- **lease reaping**: `confirm` されないまま lease 失効した行（= sidecar が配達途中で死亡）は daemon が **`UNDELIVERED` へ戻す**（再 eligible）。これにより「**配達確定は emit 成功の後**」が **end-to-end で真**になり、lost-message window が閉じる。
+- **lease reaping**: `confirm` されないまま lease 失効した行（= sidecar が配達途中で死亡）は daemon が **`UNDELIVERED` へ戻す**（再 eligible）。これにより「**配達確定（`DELIVERED`）は notification emit の*後***」が成立し、sidecar 死亡時の lost-message window が閉じる。
+  - **`DELIVERED` の意味の正確化（過大主張の回避）**: `mcp.notification` の resolve が保証するのは **harness transport が notification を受理した**ことまでで、「モデルのターンへ可視注入され処理された」ことの証明ではない（sidecar→harness 受理後・実表示前に harness 側で落ちる failure model は未定義）。よって `DELIVERED` = 「**harness 受理済**」と定義し、それ以上を主張しない。この残余 window（受理〜可視の間）こそ **at-least-once + 冪等表示**が許容する対象であり、**§9.5 の K1 spike に「`mcp.notification` resolve の可視性 / 障害境界」の実測を含める**（resolve が idle wake と等価かを検証するまで `DELIVERED` の意味は harness 受理に留める）。
 - **配達保証の明示選択 — at-least-once + 冪等表示**: idle-wake 用途では **at-most-once + 喪失リスクより、at-least-once + 冪等表示**（同一メッセージの重複表示は良性、喪失は致命）を採る。`DELIVERED`（confirm 済）は**二度と再配達しない**（confirmed 上は at-most-once）。`CLAIMED` のまま reap された行は再 eligible 化される（ライフサイクル全体では at-least-once）。**Contract Surface 2.3 との整合**: 「`CLAIMED`-but-unconfirmed は *successful drain ではない*」ため再配達は契約合法。`DELIVERED` は再配達しない = Surface 2.3 の「drain 後再配達しない」を満たす（§9.9 S3 で Surface 2.3 を「`UNDELIVERED`-and-unclaimed をドレインする」へ加算 amend）。
 - **push→pull flip = claim-issuance ゲート（drain-path ゲートではない）**: delivery_mode の PUSH→PULL 反転は「**新規 sidecar claim の発行を daemon が拒否する**」ことを意味する（既に in-flight な claim は **mode-epoch fencing** で扱う: flip 時に daemon が epoch を進め、旧 epoch の stale な sidecar drain/confirm を**拒否**して当該行を `UNDELIVERED` へ戻す）。これで flip は in-flight drain に対し **原子的**になる。
 - **check_messages（両 mode）は claim-respecting view をドレインする**: `check_messages` は **`UNDELIVERED`-and-unclaimed + lease 失効で reclaim 済**の行のみを返し、**それ自体が claim を取る（または 1 daemon トランザクション内で `DELIVERED` 化）**。これにより (i) live な sidecar claim とは二重配達しない、(ii) 並行する 2 つの `check_messages` も二重ドレインしない。**single-drainer 性は『per-agent mode boolean』ではなく『daemon の行レベル claim 所有権』が担保する**（boolean は境界をまたぐ in-flight 操作に mutual exclusion を与えられないため）。
@@ -288,7 +292,8 @@ secretary は **人間対話主体** で、応答性を保つため **blocking �
 | **dispatcher** | DELEGATE 受信は **channel push が一次**。`/loop 3m` は **pane lifecycle（`poll_events`）のため依然必須**で廃止しない | `/loop 3m` 各サイクルの `check_messages`（§3.3） |
 | **secretary** | DELEGATED / 完了報告は **channel push が一次**（idle でも注入）。B2 attention sidecar（§3.2）は **依然 active-signal 層として有効**（push は agent を起こすが、人間不在 gap の*人間*ページングは別軸） | §3.2 B1 ターン冒頭 poll |
 
-- **nudge（§3.1 の打鍵 accelerator N1）の位置づけ更新**: push の正準手段が `claude/channel` になったため、**nudge は wake 機構として不要化**（PTY nudge は idle を起こさないことが dogfood で確定済、§3.1）。N1（打鍵 accelerator）は **channel sidecar に supersede され撤回**する（フォールバック層は pull cadence が担い、nudge には残す役割が無い）。§5 / §6.2 N1 行・ja-migration §8 Issue H N1 部は §9.9 で「channel sidecar に置換・撤回」と更新する。
+- **nudge（§3.1 の打鍵 accelerator N1）の位置づけ更新 — 撤回するのは*配送*ナッジに限る**: push の正準手段が `claude/channel` になったため、**broker の out-of-band *配送*ナッジ（N1 = 「📨 新着あり」をキューに積んで in-pane に出す信号）は撤回**する（PTY 配送ナッジは idle を起こさないことが dogfood で確定済、§3.1。channel sidecar に supersede され、フォールバック層は pull cadence が担うため残す役割が無い）。§5 / §6.2 N1 行・ja-migration §8 Issue H N1 部は §9.9 で「channel sidecar に置換・撤回」と更新する。
+  - **§3.5 の*介入層* literal-text redirect は別物で、撤回しない**: §3.5 の暫定 fallback「idle worker へ literal text + Enter で `check_messages` を打鍵起こし」は、**プロンプトへの実 submission（= 介入）**であり、out-of-band *配送*ナッジ（不起床）とは機構が異なる（実打鍵は idle ペインのターンを実際に起こす）。これは **配送路ではなく*介入* accelerator**（割り込み安全な論理ペイン限定・secretary 除外）として、push フォールバック時に idle worker を動かす任意手段として残る。**「配送ナッジ撤回」と「介入打鍵存続」は両立する**（前者=delivery、後者=intervention）。
 - **secretary への push は安全**: §3.2 B3 が却下した「secretary 実ペイン化 + 打鍵 nudge」は人間 IME compose 破壊が理由だったが、**`claude/channel` は PTY を経由しない in-band 注入**のため IME を破壊しない（renga の in-band push と同じ層）。よって secretary も push 一次の対象に含められる（B1 はフォールバック）。
 
 ### 9.7 既定 renga 経路の不変性（§4 の補正を含む）
@@ -327,10 +332,10 @@ secretary は **人間対話主体** で、応答性を保つため **blocking �
 | **R4** | runtime（daemon） | `broker/store.py` + `broker/tokens.py` + `broker/server.py` | **daemon delivery lifecycle 改修**: 三状態 schema（`CLAIMED(lease,owner,epoch)`）・`/poll-claims` + `/confirm-delivered` endpoint・per-agent `delivery_mode`（PUSH/PULL）+ heartbeat health・**delivery-scoped token scope**（`tokens.py` に `scope` 加算、§9.4）・mode-epoch fencing。`check_messages` を claim-respecting view 化 | **B**（broker） | push 一次 |
 | **D2** | descriptor | transport surface descriptor（§6.3 D1） | broker の `receive_mode` を **`poll`→`push`**（fallback=`poll`）へ更新。launcher argv（dev-channel injection の有無）を descriptor 駆動化し **Issue D golden に launcher argv の bit 等価**を追加（§9.7）。**D1 の「broker=poll 定数」記述を本 D2 が supersede** | **D** | push 一次 |
 | **S3** | 契約改訂提案 | Set D Surface 1.2 / 2.1 / 2.3 / 5.1 / 8 | **dev-channel 廃止提案の撤回**（Surface 1.2/5.1 の ratified dev-channel injection を `org-broker-channel` に対して再確認）。**Surface 2.1 の「push 廃し pull 統一」提案を「push 一次（channel）+ pull フォールバック」へ差し替え**。**Surface 2.3 に三状態（`CLAIMED`/`/confirm`/lease-reap）を SemVer-additive 加算**し drain semantics を「`UNDELIVERED`-and-unclaimed をドレイン」へ。Surface 8 に delivery-scoped token scope を加算。**いずれも改訂*提案***（contract は ratified SoT・批准 PR は人間ゲート） | **E**（契約） | push 一次 |
-| **K1** | spike ゲート | Claude Code harness 実測 | §9.5 の **HARD pre-ratification spike**: tool-less channel server の load 可否 / idle wake / renga coexist の 3 点実測。**不成立なら sidecar 同梱形へ fallback**。ratify 前の必須ゲート | **G**（dogfood ゲート） | push 一次 |
+| **K1** | spike ゲート | Claude Code harness 実測 | §9.5 の **HARD pre-ratification spike**: tool-less channel server の load 可否 / idle wake / renga coexist の 3 点実測。**+ `mcp.notification` resolve の可視性/障害境界**（§9.3 末尾）。**不成立なら sidecar 同梱形へ fallback**。ratify 前の必須ゲート | **依存順で E より前の独立ゲート**（PASS が E=S3 契約批准 / P8・P9 prose land の前提。実走は G dogfood 環境を流用可だが判定は上流） | push 一次 |
 | ~~N1~~ | （撤回） | broker nudge accelerator | **撤回**: push の正準手段が `claude/channel` になり nudge は wake 機構として不要（§9.6）。ja-migration §8 Issue H の N1 部は「channel sidecar に置換」と更新 | — | — |
 
-> **ja-migration §8 への反映**: A（+R3 channel sidecar spawn）/ B（+R4 daemon delivery lifecycle + delivery-scoped token）/ D（+D2 receive_mode=push + launcher argv golden）/ E（+P8/P9 prose + S3 契約改訂）/ G（+K1 spike ゲート + 3-3b 承認再導入 AC）/ H（N1 撤回・S2 attention sidecar は §3.2 のまま有効）。push 一次の中心質量（R3/R4 runtime + P8/P9 prose）は **新規 runtime（R3/R4）が Issue A/B に、prose が Issue E に**集中する。
+> **ja-migration §8 への反映**: A（+R3 channel sidecar spawn）/ B（+R4 daemon delivery lifecycle + delivery-scoped token）/ D（+D2 receive_mode=push + launcher argv golden）/ E（+P8/P9 prose + S3 契約改訂）/ G（+3-3b 承認再導入 AC）/ H（N1 撤回・S2 attention sidecar は §3.2 のまま有効）。**K1 spike ゲートは依存順で E より前の独立ゲート**（E/G の批准前提・§9.5）。push 一次の中心質量（R3/R4 runtime + P8/P9 prose）は **新規 runtime（R3/R4）が Issue A/B に、prose が Issue E に**集中する。
 
 ---
 

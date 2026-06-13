@@ -150,7 +150,7 @@ Phase 2（棚卸し・契約整合）の先行実施として、リポジトリ�
 ### 4.3 窓口への割り込み配達（ナッジ。旧・最難関 → 実証済み）
 
 > **役割の再定義（2026-06-13、dogfood / Refs #16）— 本節は正準配送路ではない**: 本節のナッジ配達は AC-1 で「**IME・入力を壊さない**（非破壊）」ことを実証したが、その後の本番 dogfood（ja#515、2026-06-13）で **「ナッジは idle セッションを *起こさない*」**（キュー滞留したまま未処理）が観測された。したがって受信の**正準路は pull-first cadence**（各役割が所有 cadence で能動 `check_messages` / 必要箇所は `/loop` 実発火）であり、**ナッジ打鍵は任意・defer の低遅延 accelerator（[ja-migration-plan.md](ja-migration-plan.md) §8 Issue H の N1、F 同列）に降格**する。本節の静止確認・冪等性・IME 非破壊の知見は **その accelerator を安全に実装するための根拠**として有効。**特に窓口（secretary）へのナッジは採らない**（人間 IME compose 破壊 + agent を起こさないため二重に不適。窓口受信は turn 冒頭 poll + attention sidecar の二層、[broker-native-roles.md](broker-native-roles.md) §3.2 B1/B2/B3）。挙動層の一次設計は **[broker-native-roles.md](broker-native-roles.md) を参照**。
-> **さらなる再反転（2026-06-13、Issue #18）**: 上記「正準路 = pull-first cadence / ナッジ = 任意 accelerator」は **#18 で再反転**した。受信の**正準路は push 一次（`claude/channel` channel sidecar）**となり、**pull-first cadence はフォールバック層**へ降格（push mode 失効時の保険）。**ナッジ（PTY 打鍵）は accelerator としても撤回**（push の正準手段が PTY → `claude/channel` に替わり、idle を起こさない PTY ナッジに残す役割が無い）。`claude/channel` は PTY 非経由の in-band 注入のため **secretary も push 一次の対象**にできる（IME compose を壊さない）。本節の静止確認・IME 非破壊知見は、push 失効時に idle worker を起こす任意打鍵（§9.6・割り込み安全な論理ペイン限定）の根拠としてのみ残る。一次設計は [broker-native-roles.md](broker-native-roles.md) §9。
+> **さらなる再反転（2026-06-13、Issue #18）**: 上記「正準路 = pull-first cadence / ナッジ = 任意 accelerator」は **#18 で再反転**した。受信の**正準路は push 一次（`claude/channel` channel sidecar）**となり、**pull-first cadence はフォールバック層**へ降格（push mode 失効時の保険）。**本節の*配送*ナッジ（broker の out-of-band 信号）は撤回**（push の正準手段が PTY → `claude/channel` に替わり、idle を起こさない配送ナッジに残す役割が無い）。`claude/channel` は PTY 非経由の in-band 注入のため **secretary も push 一次の対象**にできる（IME compose を壊さない）。**ただし撤回は*配送*ナッジに限る** — [broker-native-roles.md](broker-native-roles.md) §3.5 の*介入層* literal-text+Enter redirect（プロンプトへの実 submission = 介入。idle ペインを実際に起こす）は配送路ではなく介入 accelerator として存続する（割り込み安全な論理ペイン限定・secretary 除外）。本節の静止確認・IME 非破壊知見は、その**介入打鍵**の安全根拠としてのみ残る（配送には使わない）。一次設計は [broker-native-roles.md](broker-native-roles.md) §9（配送ナッジ撤回と介入打鍵存続の両立は §9.6）。
 
 MCP は要求応答型であり、対話中の Claude セッションへ push できない。renga のチャネル注入（in-band push）の代替として、以下の 2 段構えを提案する:
 
@@ -378,7 +378,7 @@ Issue #5 の完了基準 4 項目をすべて GO で満たした:
 
 | リスク | 整理 |
 |---|---|
-| ナッジ注入の混線 | 受信側が長文入力中だと renga のチャネル注入より一段劣りうる。静止確認 defer（[§4.3](#43-窓口への割り込み配達ナッジ旧最難関--実証済み)）で緩和し、Phase 1 の 4 状態 AC-1（[§7.1](#71-phase-1-スパイク全ペイン-renga-free-起動の実証)）で**全状態 GO 済**（IME 変換中含む）。**旧「壊れたら計画ごと中止」は撤回**（§1.2 制約撤回 + AC-1 達成）。特定環境で混線が再発しても renga opt-in fallback で degrade を吸収する（計画は死なない） |
+| ナッジ注入の混線（#18 で主要リスクから後退） | **#18 後は配送ナッジを撤回**し正準配送が `claude/channel`（PTY 非経由の in-band 注入）になったため、本リスク（PTY 混線）は配送路から外れた。新たな主要リスクは **(i) tool-less channel server の load 可否（§9.5 K1 spike で実測・不成立なら sidecar 同梱形へ fallback）、(ii) experimental capability の安定性（pull-first cadence が構造的保険）、(iii) delivery-scoped credential / channel sidecar のライフサイクル（切戻し第 6 条件、§9.7）**。残存する PTY 打鍵は §3.5 の*介入*用途のみで、静止確認 defer + AC-1（IME 非破壊・**全状態 GO 済**）がその安全根拠。特定環境で混線が再発しても renga opt-in fallback で degrade を吸収する（計画は死なない）。一次設計は [`broker-native-roles.md`](broker-native-roles.md) §9 |
 | WezTerm 常駐の新前提化 | renga 依存を外す代わりに端末 backend（WezTerm / tmux）+ broker デーモンが前提に加わる。adapter 境界により二次移行は安価 — **Phase 2 で tmux 第二実装を成立させ、同一 AC が backend パラメータ切替で両系 green になることを実証**（[§4.7](#47-terminal-adapter-の境界と能力表)）。POSIX=tmux / Windows=WezTerm の使い分けが可能 |
 | イベント合成の劣化 | WezTerm にはネイティブの pane lifecycle イベントがなく、ポーリング合成になる（[§4.7](#47-terminal-adapter-の境界と能力表)）。Set D Q9 の best-effort 許容内だが、監視の実効遅延は増える |
 | broker の単一障害点化 | 現行 renga サーバーも同様の単一点だが、broker はデーモン管理（起動・再起動・queue store の復旧）という新しい運用責務を持ち込む。Phase 3 取り込み時に起動・死活の runbook を用意する |
@@ -388,6 +388,7 @@ Issue #5 の完了基準 4 項目をすべて GO で満たした:
 
 - **dispatcher の決定的処理の Python 化**: 監視ループ等を broker 側 code に寄せる構想はあるが、本設計のスコープ外（一次入力で合意済み）。
 - **at-least-once 配達への強化**: Set D 2.3 の at-most-once drain を継承する（[§5](#5-contract-set-d-との整合差分表)）。broker queue store は永続化を持つため、将来 ack ベースの再配達に強化する余地はあるが、契約変更を伴うため本設計では扱わない。
+  - **#18 で取り込み済（2026-06-13）**: push 一次配送（[`broker-native-roles.md`](broker-native-roles.md) §9.3）が **まさにこの ack ベース再配達**を採用した（`/confirm-delivered` + lease-reap で unconfirmed claim をライフサイクル全体 at-least-once 化、`DELIVERED`=confirmed は再配達せず）。よって **配達保証の正本は broker push 経路では `broker-native-roles.md` §9.3**（本項の「本設計では扱わない」は #16 renga-decoupling 時点の留保で、#18 が上書き）。契約改訂は §5 S3（Surface 2.3 への三状態加算）として提案済。
 - ~~**tmux adapter**: 能力表に参考として載せたのみ。実装計画はない。~~ → **Phase 2 で実装済み**（[`spike/tmux_adapter.py`](../../spike/tmux_adapter.py)、POSIX 正準 backend）。能力表（[§4.7](#47-terminal-adapter-の境界と能力表)）の tmux 列は実測値に更新済み。残るスコープ外は messaging / pane-control 以外の tmux 固有機能（copy-mode 連携等）であり、本設計の対象外。
 - **focus_pane / new_tab の broker 公開**: 初期 surface から除外（[§4.2](#42-broker-mcp-surface役割別公開面)）。人間向け補助が必要になった時点で追加を検討する。
 
