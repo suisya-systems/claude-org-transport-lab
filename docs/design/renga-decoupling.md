@@ -94,6 +94,8 @@ Phase 2（棚卸し・契約整合）の先行実施として、リポジトリ�
 
 ## 4. 提案アーキテクチャ: org-broker + terminal adapter
 
+> **#18 配送モデル方向反転の注記（2026-06-13）— §4.1 全体像図 / §4.2 surface 表の「ナッジ配達」は #16 時点の旧機構**: 本節 §4.1 の全体像図・§4.2 の「ナッジ注入（配達の内部機構）」行は **pull-first（#16）時点の配送機構**を描いている。**#18 で配送ナッジは撤回**され、正準配送は **per-session `claude/channel` channel sidecar（daemon queue を claim→push して in-band 注入）**に置き換わった（§4.3 末尾の #18 注記・[`broker-native-roles.md`](broker-native-roles.md) §9）。本節の図表は履歴として残すが、**現行の配送機構の SoT は `broker-native-roles.md` §9.2/§9.3**。なお terminal adapter の send-text プリミティブ自体は §3.5 の*介入*用途で引き続き必要（撤回されたのは*配送*ナッジのみ）。
+
 ### 4.1 全体像
 
 ```
@@ -267,7 +269,7 @@ adapter は「messaging adapter（Phase 3 が要求する最小能力）」と�
 > - **Surface 1.2 / 5.1（dev-channel）**: 「dev-channel injection を廃止し `--mcp-config` へ置換」は **未批准提案**であり **#18 が撤回**する（Set D 本文は dev-channel injection を依然 MUST = 批准済への回帰）。broker は **`--mcp-config`（daemon）+ dev-channel（`server:org-broker-channel` channel sidecar）併用**。
 > - **Surface 6（error codes）**: `nudge_failed` は **撤回**（ナッジ撤回）。
 > - **Surface 8（Broker auth & delivery）**: ナッジ配達契約を **channel sidecar 配送契約**（claim-then-confirm・delivery-scoped token scope・heartbeat health・mode-epoch fencing、§9.3/§9.4）へ差し替え。
-> いずれも改訂*提案*（批准は人間ゲート）。下表 2.1/5.1 行は #16 時点の pull-first 提案として残す（履歴）。
+> いずれも改訂*提案*（批准は人間ゲート）。下表の該当行（Surface 2.1 / 2.3 / 1.2 / 5.1 / 6 / 8）は #16 時点の pull-first 提案として残すが、**上記の #18 注記が各行の現行 SoT で上書き**する（履歴として下表は保持）。
 
 | Set D Surface | 区分 | 差分の要点 |
 |---|---|---|
