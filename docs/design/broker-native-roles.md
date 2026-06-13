@@ -1,10 +1,17 @@
-# broker-native な役割要素の設計再導出 — push→pull の挙動層
+# broker-native な役割要素の設計再導出 — 受信挙動層（#16 pull-first → #18 push 一次 + pull フォールバック）
+
+<!-- 旧題: 「push→pull の挙動層」。#18（§9）で配送モデルを push 一次へ再反転したため改題。 -->
+
 
 > **status / 位置付け**: design only。Epic #6（renga 依存解消 / Plan B）の挙動層設計。`docs/design/ja-migration-plan.md` の **§5.2(ii)（静的 prose の両系併記）** と **§8 Issue E（ja prose + 契約改訂）** が「受信モデル（push→pull）の prose を両系併記する」と宣言した、その **prose の中身（受信 cadence と役割セマンティクス）を再導出する** 文書。§5 は ja 改変を「1 flag + 1 生成系シーム」に閉じる *静的シーム* の SoT であり、本書はそのシームを通過する *挙動* の SoT。両者は **概ね直交** する（例外: §6.3 D1 の descriptor フィールド追加だけは §5.2(i) 静的シームに接する。§7 で整合と反対仮説の反証を明記）。
 >
 > **入力**: (1) transport-lab Issue #16 本文、(2) suisya-systems/claude-org-ja#515 の dogfood 実走観測コメント（2026-06-13、flag=broker で委譲サイクル実走中に観測された defect 1〜4 + transport 非依存の #5→ja#554）、(3) 窓口追加観測（2026-06-13）: broker tmux adapter の key 語彙制限（Escape 不可）による **介入層 defect**（§3.5）。
 >
 > **不可触制約**: 本タスクは設計のみ。production claude-org-ja / runtime 挙動 / GitHub への書込は行わない。本書は transport-lab worktree 内の設計 doc 追加と、`ja-migration-plan.md` への相互参照ポインタ追記に閉じる。ja への実反映は §6 の変更一覧として分解し、人間ゲート後に窓口/ユーザー判断で行う。
+>
+> ---
+>
+> ⚠️ **配送モデルの方向反転（2026-06-13 追補、Issue #18）— 本書を読む前に**: 本書 §1〜§8 は #16 の枠組み（**pull-first cadence を正準・nudge を任意 accelerator**）で書かれている。その後ユーザー判断（ja#515 dogfood レビュー）と決定的 prior art（happy-ryo/claude-peers-mcp の `claude/channel` パターン）を受け、**配送モデルを「push 一次（claude/channel）+ pull フォールバック」へ反転**した。**§9（push 一次配送への再設計）が現行の SoT** であり、**§2 / §3.1 の pull-first cadence は『正準』から『フォールバック層』へ降格**する（push mode 失効時・channel 非対応エージェント向けの保険）。§1〜§8 を読むときは §9.6 の読み替え規定を併せて参照すること。§9 は §1〜§8 を**撤回しない**（pull cadence の役割別設計はフォールバック層としてそのまま生きる）が、**どちらが一次か**を反転する。
 
 ---
 
@@ -26,6 +33,8 @@ ja の broker 対応は `mcp__renga-peers__*` → `mcp__org-broker__*` の **完
 ---
 
 ## 2. 受信モデルの一次再設計 — pull-first cadence（役割別）
+
+> **§9 による再位置付け（Issue #18）**: 本節の pull-first cadence は **#18 で『フォールバック層』に降格** した（push mode 失効時に自動発動する保険）。push mode（healthy な channel sidecar が登録・heartbeat 中）では、各役割の受信契機は **claude/channel push が一次**であり、本節の cadence はその一次が効かない場合の degrade 経路として読む。役割別の読み替え（worker / dispatcher / secretary それぞれで何が一次・何がフォールバックか）は **§9.6** を一次参照。本節の設計自体（誰が・いつ・どの粒度で `check_messages` するか）は **フォールバック層としてそのまま有効**。
 
 全役割に **受信 cadence**（誰が・いつ・どの粒度で `check_messages` するか）を定義する。renga 枝（push 前提）は不変のまま、broker 枝にこの cadence を追加する（両系併記、§5.2(ii)）。
 
@@ -137,7 +146,8 @@ secretary は **人間対話主体** で、応答性を保つため **blocking �
 1. **すべて broker 枝に閉じる**: §2 の pull cadence、§3.1 の poll baseline、§3.3 の /loop 実発火 prose（`.dispatcher/CLAUDE.md` 監視エントリの broker 枝）、§2 worker の完了後 review-watch /loop、§3.2 B1 のターン冒頭 poll は、いずれも **`ORG_TRANSPORT=broker` 条件下の broker 枝**（§5.2(ii) 両系併記の broker 側）に書く。renga 枝の「in-band push → 即応答」prose は **一字も変えない**。
 2. **加算のみ**: §3.2 B2（attention sidecar のキュー拡張）・§3.4（tmux 単一セッション）・§3.5（adapter key 語彙への Escape 追加 / 介入 prose の broker 枝）は **broker transport 選択時のみ作動する加算**。renga 時は watcher も adapter も現状経路、renga の send_keys は Escape/Shift+Tab を従来どおり保持。renga ツール（`mcp__renga-peers__*`）は 1 つも失われない。
 3. **flag 既定は不変**: 本書は **挙動層の prose/cadence のみ** を扱い、`ORG_TRANSPORT` の既定値（移行期=renga、§5.1）は **変えない**。既定反転は §8 Issue G ゲート後の人間判断のままで、本書はそれを前倒ししない。
-4. **切戻し忠実性**: §5.5 の切戻し 5 条件は本書の変更で増えない。broker 枝 prose は flag=renga 再生成時に renga 枝へ戻るだけ（生成系シーム §5.2(i) が両系を render するため、prose の broker 枝は flag で非選択になる）。
+4. **切戻し忠実性**: §1〜§8 の挙動層変更（prose / cadence のみ）は §5.5 の切戻し 5 条件を増やさない。broker 枝 prose は flag=renga 再生成時に renga 枝へ戻るだけ（生成系シーム §5.2(i) が両系を render するため、prose の broker 枝は flag で非選択になる）。
+   - **§9（push 一次）による補正（Issue #18）**: §9 の channel sidecar は **新規 live process**、daemon の delivery_mode / CLAIMED ライフサイクルは **新規 per-agent state** であり、これらは prose ではなく runtime 実体のため **切戻しドリルは増える**。よって「5 条件は増えない」は §9 適用下では **本書 §1〜§8 の prose 変更に限った主張**へ縮小し、§9 は **第 6 サブステップ**（per-pane channel sidecar の SIGTERM/unregister + 当該 agent の delivery_mode reset + delivery-scoped credential を §5.5 切戻し条件 (3) active ペイン respawn / (4) daemon 停止順序 / (5) token・queue 破棄の列へ enroll）を §5.5 に畳み込むことを要求する（§9.7）。**rollback drill は sidecar-reap サブステップを獲得するが、依然 bounded・flag-gated**（renga 経路は不変・第二 dev-channel を一切持たない、§9.7）。
 
 > 検証観点（ja 反映時の golden）: flag=renga で生成される全 prose/settings が **本書の変更前と bit 等価**（§8 Issue D の切戻し忠実性テストに本書由来の broker 枝が混入していないことを含める）。
 
@@ -215,9 +225,125 @@ secretary は **人間対話主体** で、応答性を保つため **blocking �
 
 ---
 
+## 9. push 一次配送への再設計 — claude/channel 採用（Refs #18）
+
+> **位置付け**: Issue #18（ユーザー判断による方向修正）の設計追補。#16 で本書 §1〜§8 が置いた「**pull-first cadence 正準 + nudge 任意 accelerator**」を、**「push 一次（claude/channel）+ pull フォールバック**」へ反転する。§2 / §3.1 の pull-first cadence は廃止ではなく **フォールバック層**（push mode 失効時・channel 非対応エージェント向け）へ降格する（読み替え規定は §9.6）。一次入力: (1) Issue #18 本文・受け入れ条件、(2) prior art **happy-ryo/claude-peers-mcp**（`broker.ts` / `server.ts` の実コードを照合）、(3) ratified Contract Set D（dev-channel injection は **撤回されていない** = §9.5 で詳述）。**design only**: 本節は設計判断・契約改訂提案・spike ゲート定義に閉じ、実装・production ja・GitHub 書込は行わない。
+
+### 9.1 方向反転の根拠 — なぜ nudge 観測が push 一次と矛盾しないか
+
+- **ユーザー判断**: ja#515 dogfood レビューで「**メッセージは push にすべき。pull の方がフォールバックであるべき**」の方向が示された（Issue #18 背景）。
+- **prior art の決定性**: claude-peers-mcp は「**中央 broker daemon（localhost HTTP + SQLite）+ セッション毎の MCP サイドカー**」構成で、サイドカーが broker を 1 秒間隔で poll し、受信を **`claude/channel` プロトコル**（`notifications/claude/channel`）でセッションへ即時注入する。すなわち **配管層 = 高頻度 poll / モデル層 = push**。idle セッションも channel notification で起きる。
+- **#16 の nudge 観測との関係（重要）**: §3.1 は「nudge（PTY 打鍵）は idle セッションを起こさない」を dogfood で観測し、それゆえ pull を正準に置いた。#18 はこの観測を **否定しない** — 否定するのは「push の*手段*」だけである。**PTY nudge は idle を起こさないが、`claude/channel` notification は idle を起こす**（harness がプロトコルとして受信をターンへ注入するため）。push の正準手段が「PTY 打鍵」から「claude/channel」へ替わったことで、#16 が pull に退避した根因（「broker には push 契機が構造的に無い」§1）が **構造的に解消**する。よって #16 の挙動層分析（cadence の役割非対称性・no-re-entry gap 等）はフォールバック層の設計としてそのまま生き、一次層だけが pull→push に戻る。
+
+### 9.2 採用アーキテクチャ — daemon（権威）+ per-session channel sidecar（配送）
+
+**設計 β を採用**（α 却下、後述）。所有境界を 2 層に分ける:
+
+- **org-broker daemon（権威層・据え置き）**: 現 broker MCP サーバー（localhost HTTP、`--mcp-config` で consume）を **そのまま権威**として残す。全 13 ツール面・queue store（`.state/broker/`）・per-agent token・role tier・**帰属（token 由来 `from_id`・なりすまし不可）**・pane 操作実行・argv allowlist guard はすべて daemon が保持。FQ ツール名 `mcp__org-broker__*` は **不変**（drop-in 維持）。**「据え置き」が指すのはこのツール権威/store/tier/帰属の層のみ** — daemon の**配送ライフサイクル**（delivery_mode・三状態・claim/confirm endpoint）は §9.3 / §9.9 R4 で **加算**する（§9.7 の「daemon UNCHANGED ではない」補正を参照）。
+- **channel sidecar（配送層・加算）**: 同一ペインに spawn される薄い **stdio MCP サーバー**（名 `org-broker-channel`）。`experimental: { "claude/channel": {} }` を宣言し、**delivery-scoped credential のみ保持**（§9.4）、**~1 秒の claim→push ループ**（§9.3）を回す。dev-channel flag（§9.5）はこの sidecar を指す。
+- **ownership boundary（一文）**: **daemon = 単一のツール権威・store・帰属。channel sidecar = per-session の配送トランスデューサで、delivery-scoped credential 1 つだけを持ち、queue→`claude/channel` の変換に**専従する。sidecar は **droppable**: 落ちれば当該 agent は pull フォールバック（§9.6）へ自動 degrade する。
+
+**α（sidecar が全ツールを proxy する collapse 案）却下**: per-session stdio sidecar を **エージェント対面の org-broker MCP サーバー本体**にして全ツールを daemon へ proxy する案（claude-peers の `server.ts` 形）。却下理由: (i) 既に批准方向の `--mcp-config` エージェント transport を **全ツールについて置換**する大改変、(ii) sidecar が **load-bearing 化**し落とせない（切戻し悪化）、(iii) 「push 一次 / pull フォールバック」の layering が不明瞭化。**α の唯一の実利（second credential を持たずに済む）は、§9.4 の delivery-scoped token で β が回収する** — daemon を単一のツール権威に保ち、sidecar を droppable に保ったまま α と同等の credential 分離を得る。よって β は α より厳密に層が綺麗。
+
+### 9.3 配送ライフサイクル — daemon 所有の三状態（at-most-once / at-least-once の正準）
+
+**β の中核**。prior art の単一 `delivered` boolean を**そのまま流用すると lost-message window が開く**ため、daemon 所有の **三状態ライフサイクル**に置き換える。
+
+**lost-message window（流用すると起きる欠陥）**: claude-peers の `broker.ts` `handlePollMessages`（L266-275）は **drain 時点で `delivered=1`** をマークし、`server.ts` `pollAndPushMessages` は HTTP 往復が返った **後**に `mcp.notification`（L425→L447）を emit する。マークと emit が **daemon/sidecar 境界をまたぐ**ため原子化できず、sidecar が両者の間で死ぬ（ペイン kill / stdio pipe 断 / notification throw）と **「配達済みだがモデルに届いていない」**メッセージが残る。Contract Surface 2.3（「successful drain 後は再配達しない」）の下で、これは **沈黙の永久喪失**になり、フォールバックの `check_messages` は空を返す。spike 側も `broker.py` L458 が「**queue は agent_id 単位の inbox なので二重 spawn は message 横取りを生む**」と同根のハザードを警告している。
+
+**設計 — 三状態 + claim-then-confirm**:
+
+| 状態 | 意味 | 遷移 |
+|---|---|---|
+| `UNDELIVERED` | 投入済み・未配達 | 初期。`send_message` が投入 |
+| `CLAIMED(lease, owner, epoch)` | ある drainer がリースで占有中（配達試行中） | drainer が claim。`owner`=drainer の credential、`epoch`=delivery_mode 世代、`lease`=期限 |
+| `DELIVERED` | 配達確定（再配達しない） | `/confirm-delivered(id)` 受領で確定 |
+
+- **sidecar push = claim-then-confirm**: poll は `/poll-claims`（**claim-with-lease**: `UNDELIVERED` を選び `CLAIMED(lease=now+T, owner=sidecar credential, epoch=現 mode-epoch)` にして行を返す）→ sidecar が各行を `notifications/claude/channel` で emit → **`mcp.notification` が resolve した行だけ** `/confirm-delivered(id)` で `DELIVERED` へ。
+- **lease reaping**: `confirm` されないまま lease 失効した行（= sidecar が配達途中で死亡）は daemon が **`UNDELIVERED` へ戻す**（再 eligible）。これにより「**配達確定（`DELIVERED`）は notification emit の*後***」が成立し、sidecar 死亡時の lost-message window が閉じる。
+  - **`DELIVERED` の意味の正確化（過大主張の回避）**: `mcp.notification` の resolve が保証するのは **harness transport が notification を受理した**ことまでで、「モデルのターンへ可視注入され処理された」ことの証明ではない（sidecar→harness 受理後・実表示前に harness 側で落ちる failure model は未定義）。よって `DELIVERED` = 「**harness 受理済**」と定義し、それ以上を主張しない。この残余 window（受理〜可視の間）こそ **at-least-once + 冪等表示**が許容する対象であり、**§9.5 の K1 spike に「`mcp.notification` resolve の可視性 / 障害境界」の実測を含める**（resolve が idle wake と等価かを検証するまで `DELIVERED` の意味は harness 受理に留める）。
+- **配達保証の明示選択 — at-least-once + 冪等表示**: idle-wake 用途では **at-most-once + 喪失リスクより、at-least-once + 冪等表示**（同一メッセージの重複表示は良性、喪失は致命）を採る。`DELIVERED`（confirm 済）は**二度と再配達しない**（confirmed 上は at-most-once）。`CLAIMED` のまま reap された行は再 eligible 化される（ライフサイクル全体では at-least-once）。**Contract Surface 2.3 との整合**: 「`CLAIMED`-but-unconfirmed は *successful drain ではない*」ため再配達は契約合法。`DELIVERED` は再配達しない = Surface 2.3 の「drain 後再配達しない」を満たす（§9.9 S3 で Surface 2.3 を「`UNDELIVERED`-and-unclaimed をドレインする」へ加算 amend）。
+- **push→pull flip = claim-issuance ゲート（drain-path ゲートではない）**: delivery_mode の PUSH→PULL 反転は「**新規 sidecar claim の発行を daemon が拒否する**」ことを意味する（既に in-flight な claim は **mode-epoch fencing** で扱う: flip 時に daemon が epoch を進め、旧 epoch の stale な sidecar drain/confirm を**拒否**して当該行を `UNDELIVERED` へ戻す）。これで flip は in-flight drain に対し **原子的**になる。
+- **check_messages（両 mode）は claim-respecting view をドレインする**: `check_messages` は **`UNDELIVERED`-and-unclaimed + lease 失効で reclaim 済**の行のみを返し、**それ自体が claim を取る（または 1 daemon トランザクション内で `DELIVERED` 化）**。これにより (i) live な sidecar claim とは二重配達しない、(ii) 並行する 2 つの `check_messages` も二重ドレインしない。**single-drainer 性は『per-agent mode boolean』ではなく『daemon の行レベル claim 所有権』が担保する**（boolean は境界をまたぐ in-flight 操作に mutual exclusion を与えられないため）。
+- **flapping/starvation 緩和**: lease `T` は **worst-case emit latency より保守的に**設定（prior art は L432 で配達ごとに `/list-peers` enrichment を 1 回行う — その遅延を勘定する）。`/confirm-delivered` は id で冪等。同一行の reclaim を N 回超えたら当該 sidecar を unhealthy 印字し当該行を pull 経路へ回す。
+
+### 9.4 トラスト境界と sidecar credential — delivery-scoped token
+
+- **「per-agent token を持つだけ＝ゼロ権威」は誤り**: spike `broker.py` で role tier は **token 由来 bind の `auth_role`（L482「権限 tier の唯一の根拠」）→ `role_tier` → `tools_for_role`** で決まる。すなわち **token の所持 = tier の所持**。ops 役割（dispatcher/secretary）の agent token をそのまま sidecar に持たせると、`close_pane` / `poll_events` / `spawn_agent` / `send_keys` 等の **pane 操作権威が第二プロセスへ漏出**する。「ツール非公開」は harness に対するツール宣言の話で、**token が daemon に対して何を呼べるか**とは無関係。よって素朴な β は **least-privilege どころか攻撃面を広げる**。
+- **設計 — delivery-scoped credential を別発行**: sidecar には agent の full token ではなく、**配送専用 credential**（`tokens.py` の bind に `scope` フィールドを加算: `delivery` | `full`）を渡す。`scope=delivery` は **`/poll-claims` と `/confirm-delivered` のみ**を、かつ **`to_id == owner` の行のみ**に対して許可し、**全ツール/tier 操作を拒否**する。`/confirm` は id で冪等。
+- **これが mutual exclusion の実装根拠でもある**: daemon は **token scope で sidecar-drain と agent-drain を識別**できる。PUSH mode では `/poll-claims` を delivery-scoped token にのみ供し、agent の full token による `check_messages` には（§9.3 の claim-respecting view 経由で）live claim 行を返さない。PULL mode ではその逆。**daemon だけがこの排他を強制できる**（両者は今日 `agent_id` が同一で素の drain primitive は区別不能、`broker.py` L458 の横取り警告がまさにこれ）。
+- spawn 儀式（§9.5）は delivery-scoped credential を sidecar の env に注入する（agent の full token とは**別物**）。
+
+### 9.5 spawn 儀式・トラスト承認・前提条件・**HARD spike ゲート**
+
+- **注入（spawn 儀式）**: broker 枝の spawn は (a) `--mcp-config <daemon>`（全ツール + agent full token）に加えて、(b) channel sidecar を `--dangerously-load-development-channels server:org-broker-channel` で load し、(c) delivery-scoped credential を sidecar env に注入する。
+- **トラスト承認**: dev-channel flag の再導入により「**Load development channel? (Y/n)**」prompt が **再出現**する（`--mcp-config`-only 設計が消した spawn-flow **3-3b 承認の broker 枝での再導入**）。これを `send_keys(enter=true)` で機械承認。folder-trust prompt も同様に機械承認。**これは ratified Contract Surface 1.2 / 5.1（dev-channel injection を MUST とする）への*回帰*であり、§9.9 S3 で「dev-channel 廃止提案の撤回」を明記する**。
+- **前提条件（継承であり新規 hard dep ではない、明示）**: push 経路は **Claude Code ≥ v2.1.80 + claude.ai login**（channels の前提、prior art README）を要する。**pull フォールバックは auth 非依存**。org は ratified billing constraint #1（対話 TUI / Max subscription・headless 禁止・API-key 不可、renga-decoupling §1.2 / ja-migration §1）で既に claude.ai 系認証に固定されているため、これは **既存前提の範囲内**。「renga 実装依存を claude.ai-login 依存に置換した」という反論に対しては: pull フォールバックが auth 非依存で correctness を保つため、push は **hard dep を足さず graceful degrade する**。
+- **「プロトコルに立つ」の正確化**: experimental `{claude/channel}` に立つことは「依存ゼロ」ではなく、renga 実装依存を **Claude Code バージョン + experimental capability 安定性の依存へ relocate** する（first-party vendor protocol なので *より良い*依存だが、結合の消滅ではない）。experimental は harness ベンダの SemVer 保証外。よって **pull-first cadence（§2/§3）は capability 退行への構造的保険**として明示的に残す。
+- **HARD pre-ratification spike ゲート（K1）**: 以下は **未検証の load-bearing 仮定**であり、ratify 前の**必須ゲート**とする — Claude Code harness が (i) **tool-less** な（ツール宣言ゼロで `experimental{claude/channel}` のみ宣言する）stdio サーバーを `--dangerously-load-development-channels` 下で **load するか**、(ii) その `notifications/claude/channel` が **idle セッションを起こすか**、(iii) **renga-peers の channel と衝突せず coexist するか**。**prior art は単一サーバーに tools と channel を同梱**しており（`server.ts` は 4 ツール + channel 宣言 + push ループを 1 サーバーに同居）、**tool-less 単独 channel サーバーの先例が無い**。(i) が不成立なら **claude-peers 形へフォールバック**: sidecar に messaging 4 ツールを同梱する（sidecar が tool-less でなくなる → §9.4 の least-privilege を再評価し、delivery-scoped でなく messaging-tier scoped token に格上げ）。**このゲートは依存順で Issue E（S3 契約批准 / P8・P9 prose land）より*前*の独立ゲート**（§9.9 K1 行）。実走自体は G の dogfood 環境を流用してよいが、**ゲート PASS は E/G 批准の前提条件**であり、判定の所在は E より上流（G の完了基準*ではなく*）。
+
+### 9.6 §2 / §3.1 pull-first cadence の「フォールバック層」への降格（読み替え規定）
+
+§2 の役割別 cadence・§3.1 の poll baseline は、**push mode が効かないとき自動発動するフォールバック層**として読む。**フォールバック発動条件**: sidecar 不在 / unhealthy（heartbeat timeout で delivery_mode=PULL）/ channel 非対応エージェント（codex pull peer）/ claude.ai login 不在環境 / experimental capability 退行。役割別の読み替え:
+
+| 役割 | push mode（一次・§9） | フォールバック（§2/§3.1、push mode 失効時） |
+|---|---|---|
+| **worker** | 指示・レビュー指摘・SUSPEND・クローズ指示は **channel push が一次**。idle worker も channel が起こす。完了後レビュー待機の bounded `/loop`（§2 worker (a-2)）は **「ペイン保持 + フォールバック poll」役割に縮小**（push が届くので /loop 無しでも受信はするが、ペイン保持と degrade 保険のため /loop は残す） | §2 worker (a-1) 実行中ターン境界 poll / (a-2) 完了後 bounded `/loop Nm` の `check_messages` |
+| **dispatcher** | DELEGATE 受信は **channel push が一次**。`/loop 3m` は **pane lifecycle（`poll_events`）のため依然必須**で廃止しない | `/loop 3m` 各サイクルの `check_messages`（§3.3） |
+| **secretary** | DELEGATED / 完了報告は **channel push が一次**（idle でも注入）。B2 attention sidecar（§3.2）は **依然 active-signal 層として有効**（push は agent を起こすが、人間不在 gap の*人間*ページングは別軸） | §3.2 B1 ターン冒頭 poll |
+
+- **nudge（§3.1 の打鍵 accelerator N1）の位置づけ更新 — 撤回するのは*配送*ナッジに限る**: push の正準手段が `claude/channel` になったため、**broker の out-of-band *配送*ナッジ（N1 = 「📨 新着あり」をキューに積んで in-pane に出す信号）は撤回**する（PTY 配送ナッジは idle を起こさないことが dogfood で確定済、§3.1。channel sidecar に supersede され、フォールバック層は pull cadence が担うため残す役割が無い）。§5 / §6.2 N1 行・ja-migration §8 Issue H N1 部は §9.9 で「channel sidecar に置換・撤回」と更新する。
+  - **§3.5 の*介入層* literal-text redirect は別物で、撤回しない**: §3.5 の暫定 fallback「idle worker へ literal text + Enter で `check_messages` を打鍵起こし」は、**プロンプトへの実 submission（= 介入）**であり、out-of-band *配送*ナッジ（不起床）とは機構が異なる（実打鍵は idle ペインのターンを実際に起こす）。これは **配送路ではなく*介入* accelerator**（割り込み安全な論理ペイン限定・secretary 除外）として、push フォールバック時に idle worker を動かす任意手段として残る。**「配送ナッジ撤回」と「介入打鍵存続」は両立する**（前者=delivery、後者=intervention）。
+- **secretary への push は安全**: §3.2 B3 が却下した「secretary 実ペイン化 + 打鍵 nudge」は人間 IME compose 破壊が理由だったが、**`claude/channel` は PTY を経由しない in-band 注入**のため IME を破壊しない（renga の in-band push と同じ層）。よって secretary も push 一次の対象に含められる（B1 はフォールバック）。
+
+### 9.7 既定 renga 経路の不変性（§4 の補正を含む）
+
+- **すべて broker 枝・加算・flag-gated**: §9 の channel sidecar・dev-channel 再導入・daemon delivery lifecycle 改修は **`ORG_TRANSPORT=broker` 枝のみ**で作動する。renga は自前の in-band push（`server:renga-peers`）と自前 dev-channel を**従来どおり保持**し、renga ツールは 1 つも失われない。
+- **launcher argv の bit 等価**: dev-channel flag 注入は **descriptor 駆動・broker 枝厳格**とし、**flag=renga 再生成は第二の dev-channel を一切 emit しない**（renga は `server:renga-peers` のみ）。これを **Issue D golden に launcher argv の bit/behavior 等価**として追加する（prose だけでなく起動 argv も等価検証）。
+- **§4(4) の補正（再掲）**: §9 適用下では「切戻し 5 条件は増えない」は **§1〜§8 の prose 変更に限った主張**へ縮小する。§9 は §5.5 切戻しドリルに **第 6 サブステップ**（per-pane channel sidecar の SIGTERM/unregister + 当該 agent の delivery_mode reset + delivery-scoped credential の revoke を、条件 (3) active ペイン respawn / (4) daemon 停止順序 / (5) token・queue 破棄の列へ enroll）を要求する。**依然 bounded・flag-gated**（renga 経路不変）。
+- **flag 既定は不変**: §9 は挙動層の一次/フォールバックの**向き**を反転するのみで、`ORG_TRANSPORT` の既定値（移行期=renga）は変えない（既定反転は ja-migration §8 Issue G ゲート後の人間判断のまま）。
+
+### 9.8 claude-peers-mcp との差分
+
+| 観点 | claude-peers（prior art） | org-broker（β・本書） |
+|---|---|---|
+| スコープ | machine-wide（全 Claude セッション） | org-scoped・**flag-gated**（renga と coexist 可、別名 `org-broker`） |
+| credential | 単一 shared secret（`~/.claude-peers-token`、全 peer 共有） | **per-agent token（full）** + **sidecar 用 delivery-scoped credential**（§9.4） |
+| 役割・権限 | なし（フラット） | **role tier**（worker/curator=messaging 4 / dispatcher/secretary=+pane 操作、構造遮断） |
+| 帰属 | `from_id` は peer 自己申告 | **token 由来**（なりすまし不可） |
+| sidecar 形 | tools + channel を **1 サーバーに同梱**（`server.ts`） | **tool-less 配送トランスデューサ**（§9.5 HARD spike で要検証。不成立なら同梱形へ fallback） |
+| 配送状態 | 単一 `delivered` boolean（**lost-message window あり**） | **三状態 UNDELIVERED→CLAIMED(lease,owner,epoch)→DELIVERED**（claim-then-confirm、§9.3） |
+| pane 操作 | なし | **daemon が権威**（spawn/close/inspect/send_keys/poll_events） |
+| daemon 起動 | sidecar が auto-launch | **org-start の daemon entry**（runtime 同梱、ja-migration §4.6） |
+| 注入 | dev-channel のみ | **`--mcp-config`（daemon）+ dev-channel（sidecar）の併用**（§9.5） |
+| フォールバック | `check_messages` 手動 | **pull-first cadence（§2/§3）が構造的フォールバック層**（§9.6） |
+| store | SQLite `~/.claude-peers.db` | **`.state/broker/` subtree**（Set C amendment、ja-migration §4.5） |
+| auto-summary | gpt-5.4-nano（任意） | スコープ外（既存 set_summary を踏襲） |
+
+### 9.9 ja 反映変更一覧の追補（§6 への加算）
+
+§6 の prose/runtime/descriptor 分解に、push 一次配送分を加算する。**すべて broker 枝・加算で、renga 枝不変**（§9.7）。**N1（nudge accelerator）は撤回**（channel sidecar に supersede、§9.6）。
+
+| ID | 層 | 対象 | 変更内容 | §8 Issue | 由来 |
+|---|---|---|---|---|---|
+| **P8** | prose（spawn 儀式） | `org-delegate/SKILL.md` Step 3（worker spawn）/ `org-start` Block D / `.dispatcher/references/spawn-flow.md` | broker 枝 spawn に **dev-channel sidecar load（`server:org-broker-channel`）+ 3-3b 機械承認の*再導入*** を記述。`renga-decoupling.md` §4.6（「dev-channel prompt は存在しない」）と contract Surface 5.1 廃止*提案*の **撤回注記**を併記（§9.5） | E（prose）+ G（spawn-flow AC） | push 一次 |
+| **P9** | prose（受信モデル） | §6 P1/P2/P5 が触る worker/secretary/dispatcher 受信 prose + 本書 §2/§3.1 | 受信を **「push 一次（channel）/ pull フォールバック」**へ（§9.6 読み替え表）。§2/§3.1 を fallback 層と明記。**P1/P2/P5/P3a/P3b は撤回せず**「フォールバック層の cadence」として読み替え | E | push 一次 |
+| **R3** | runtime（配送サイドカー） | `claude_org_runtime/broker/channel_sidecar.py`（新規） | **stdio MCP channel sidecar**: `experimental{claude/channel}` 宣言・delivery-scoped credential 保持・~1s の **claim→push ループ**（`/poll-claims`→`notifications/claude/channel`→`/confirm-delivered`）。heartbeat。org-start/spawn が per-pane で起動 | **A**（terminal/spawn）+ **B**（broker） | push 一次 |
+| **R4** | runtime（daemon） | `broker/store.py` + `broker/tokens.py` + `broker/server.py` | **daemon delivery lifecycle 改修**: 三状態 schema（`CLAIMED(lease,owner,epoch)`）・`/poll-claims` + `/confirm-delivered` endpoint・per-agent `delivery_mode`（PUSH/PULL）+ heartbeat health・**delivery-scoped token scope**（`tokens.py` に `scope` 加算、§9.4）・mode-epoch fencing。`check_messages` を claim-respecting view 化 | **B**（broker） | push 一次 |
+| **D2** | descriptor | transport surface descriptor（§6.3 D1） | broker の `receive_mode` を **`poll`→`push`**（fallback=`poll`）へ更新。launcher argv（dev-channel injection の有無）を descriptor 駆動化し **Issue D golden に launcher argv の bit 等価**を追加（§9.7）。**D1 の「broker=poll 定数」記述を本 D2 が supersede** | **D** | push 一次 |
+| **S3** | 契約改訂提案 | Set D Surface 1.2 / 2.1 / 2.3 / 5.1 / 8 | **dev-channel 廃止提案の撤回**（Surface 1.2/5.1 の ratified dev-channel injection を `org-broker-channel` に対して再確認）。**Surface 2.1 の「push 廃し pull 統一」提案を「push 一次（channel）+ pull フォールバック」へ差し替え**。**Surface 2.3 に三状態（`CLAIMED`/`/confirm`/lease-reap）を SemVer-additive 加算**し drain semantics を「`UNDELIVERED`-and-unclaimed をドレイン」へ。Surface 8 に delivery-scoped token scope を加算。**いずれも改訂*提案***（contract は ratified SoT・批准 PR は人間ゲート） | **E**（契約） | push 一次 |
+| **K1** | spike ゲート | Claude Code harness 実測 | §9.5 の **HARD pre-ratification spike**: tool-less channel server の load 可否 / idle wake / renga coexist の 3 点実測。**+ `mcp.notification` resolve の可視性/障害境界**（§9.3 末尾）。**不成立なら sidecar 同梱形へ fallback**。ratify 前の必須ゲート | **依存順で E より前の独立ゲート**（PASS が E=S3 契約批准 / P8・P9 prose land の前提。実走は G dogfood 環境を流用可だが判定は上流） | push 一次 |
+| ~~N1~~ | （撤回） | broker nudge accelerator | **撤回**: push の正準手段が `claude/channel` になり nudge は wake 機構として不要（§9.6）。ja-migration §8 Issue H の N1 部は「channel sidecar に置換」と更新 | — | — |
+
+> **ja-migration §8 への反映**: A（+R3 channel sidecar spawn）/ B（+R4 daemon delivery lifecycle + delivery-scoped token）/ D（+D2 receive_mode=push + launcher argv golden）/ E（+P8/P9 prose + S3 契約改訂）/ G（+3-3b 承認再導入 AC）/ H（N1 撤回・S2 attention sidecar は §3.2 のまま有効）。**K1 spike ゲートは依存順で E より前の独立ゲート**（E/G の批准前提・§9.5）。push 一次の中心質量（R3/R4 runtime + P8/P9 prose）は **新規 runtime（R3/R4）が Issue A/B に、prose が Issue E に**集中する。
+
+---
+
 ## 改訂履歴
 
 - 2026-06-13: 初版（design only / Refs #16）。transport-lab Issue #16 と ja#515 dogfood コメント（2026-06-13、defect 1〜4）を入力に、push→pull の挙動層を broker-native に再導出。受信モデルを **pull-first cadence**（役割別: worker=turn-boundary / dispatcher=loop-3m / secretary=turn-prologue+sidecar）として一次設計。nudge は **poll 正準 + 打鍵 accelerator defer**（§6.3 reconcile と同型、推奨 C）。defect 1（nudge wakeup）/2（secretary 受信ループ= B1 ターン冒頭 poll + B2 attention sidecar 拡張）/3（dispatcher /loop 実発火）/4（tmux 単一セッション再構成）に各々設計上の対処を明記。既定 renga 経路の不変性を 4 点で構造保証。ja 反映変更一覧（P1 / P2 / P3a / P3b / P4 / P5 / P6 / S2 / R1 / N1 / D1）を層別・§8 Issue 別に分解。**重要な発見**: 第 1 次 prose pass（org-delegate L42 / org-start L56）が「ナッジを見たら」という push 残留仮定を broker 枝に持ち込んでおり、これを pull-first へ修正（P1/P3a）。新規 doc 採用判断（§5 は静的シーム SoT、本書は挙動層 SoT、概ね直交）。
   - **同日 adversarial design review（4 lens × 検証、Blocker 1 / Major 7 を反映）**: (1) **[Blocker]** worker 完了後レビュー待機が defect 3 を worker に再発させる no-re-entry gap だったため、§2 worker を 2 フェーズ化（実行中=ターン境界 poll / 完了後=bounded `/loop Nm` 実発火）し P1/P5/§8 を整合（§3.3 dispatcher と同型）。(2) **[Major]** defect 3 の /loop 修正対象を **org-start Block D → `.dispatcher/CLAUDE.md` L121/L134** に是正（org-start に /loop は無い・secretary は dispatcher session で /loop を invoke 不可。grep 検証付き）。P3 を P3a（org-start L56 / defect 1）と P3b（dispatcher / defect 3）に分割。(3) **[Major]** §1/§2 の「`receive_mode` 定数が既存」表現を「broker は構造的 pull・`receive_mode="poll"` は §8.8 contract amendment / D1 提案で未実装」に是正。(4) **[Major]** D1 の `receive_mode` が既存 contract 出力フィールド（backend-interface-contract §8.8）と同名のため、descriptor を *上流 SoT* とする linkage を明記（rename しない）。(5) **[Major]** S2「新規インフラ不要・既存 sidecar 再利用」は誤り（`attention/readers.py` は queue read 経路を持たない）→「sidecar 骨格は再利用だが reader 入力は net-new」に是正し独立 runtime Issue 化。(6) **[Major→partial]** §7 に反対仮説（§5.2(ii).a 小節へ畳む案）の明示と反証を追加、「直交」を「概ね直交」に緩和。(7) **[Major→partial]** §3.2 に B2 の被覆範囲（通知のみ・agent は起こさない・人間不在 ack 遅延は次の人間ターンに bound・#312 遷移条件は不変で dispatcher 機械観測が backstop）を明示。
 - 2026-06-13: **追加 defect（介入層）を反映（窓口追加観測 / Refs #16）**。broker tmux adapter の `send_keys` key 語彙制限（**Escape 不可** = `[key_unsupported]`、Enter/Ctrl+C/literal のみ）で org-delegate の Escape ベース worker 介入手順が実行不能、を §3.5 に追加。**Ctrl+C 安全性評価**: Escape（graceful 中断・冪等再送可）と Ctrl+C（非冪等・2 回で Claude exit = session 喪失・粒度粗）は等価でないと結論。**設計 2 horizon**: 正準 = adapter key 語彙に Escape/Shift+Tab 追加（tmux ネイティブ・drop-in 不変、R2 → Issue A+C）/ 暫定 = gated single Ctrl+C（生成中 pre-check・厳密 1 回再送禁止・session 生存 post-check・死亡時エスカレート）+ idle redirect は pull 受信。変更一覧に R2（adapter 語彙）/ P7（介入 prose broker 枝 + renga-error-codes 注記）を追加。既定 renga の介入手順・send_keys 語彙は不変（broker 枝 adapter 加算）。
   - **Codex セルフレビューゲート（full、Blocker/Major ゼロまで収束）での追加是正**: (i) §8 Issue 表に S2 runtime / N1 の所在が無く R1 が Issue A scope 外だったため、ja-migration-plan §8 に **Issue H 新設**（S2 watcher input 拡張 + N1 nudge accelerator）+ **Issue A に R1**（tmux 単一セッション化）+ **Issue D に D1**（receive_mode descriptor）を反映。(ii) ja-migration-plan §3.2 / renga-decoupling §7.1 受信モデル節の旧「ナッジを見たら」を pull-first 文言へ修正。(iii) renga-decoupling **§4.3 / §7.1 AC-1 / §7.3** がナッジを正準配送路・Phase 3 必須完了条件として扱っていた矛盾を、**ナッジ=任意 accelerator（N1）へ降格・正準=pull-first cadence** の再定義注記で解消（AC-1 は IME 非破壊の実証であり「idle を起こす」ことは実証しない、と射程を明示）。
+- 2026-06-13: **§9 push 一次配送への再設計を追補（design only / Refs #18）**。ユーザー判断（ja#515 dogfood レビュー「push にすべき・pull はフォールバック」）+ 決定的 prior art（happy-ryo/claude-peers-mcp の `claude/channel` パターン、`broker.ts`/`server.ts` 実コード照合）を受け、配送モデルを **#16 の「pull-first 正準 + nudge 任意」から「push 一次（claude/channel）+ pull フォールバック」へ反転**。**§1〜§8 は撤回せず、§2/§3.1 を『フォールバック層』へ降格**（読み替え規定 §9.6）。採用 = **β: daemon（権威・全ツール・据え置き）+ per-session channel sidecar（配送トランスデューサ・droppable）**（α=全ツール proxy 案は却下、唯一の実利は delivery-scoped token で回収）。spawn 儀式に **dev-channel 再導入 + 3-3b 機械承認**、claude-peers との差分（§9.8）、ja 反映追補（P8/P9/R3/R4/D2/S3/K1、N1 撤回）。top banner + §2 reframe + §4(4) 補正を併記。**nudge の正準手段が PTY 打鍵 → claude/channel に替わったことで #16 の根因（push 契機なし）が構造的に解消**する点を明示（nudge 観測の否定ではなく push 手段の置換）。
+  - **同日 adversarial design panel（3 lens 並列 × 検証、Blocker/Major 収束）を反映**: (1) **[Blocker]** prior art 単一 `delivered` boolean の **lost-message window**（`broker.ts` L266-275 が drain 時マーク・`server.ts` L425→L447 が後 emit、境界またぎで原子化不能 → sidecar 死で沈黙喪失）を、**daemon 所有の三状態 `UNDELIVERED→CLAIMED(lease,owner,epoch)→DELIVERED` + claim-then-confirm + lease-reap**で閉鎖（§9.3）。配達保証を **at-least-once + 冪等表示**に明示選択。(2) **[Blocker]** 「per-agent token を持つ sidecar = ゼロ権威」の誤り（`broker.py` L482 `auth_role` = tier の唯一根拠 → ops token は pane 操作権威を漏出）を、**delivery-scoped credential 別発行**（`scope` 加算・drain-own-inbox/confirm のみ）で是正（§9.4）。これが sidecar-drain/agent-drain 識別 = mutual exclusion の実装根拠も与える。(3) **[Major]** 「daemon UNCHANGED」を撤回し daemon delta（delivery_mode + caller-aware drain + CLAIMED schema、R4）を明記。(4) **[Major]** push→pull flip を **claim-issuance ゲート + mode-epoch fencing** に定式化（drain-path ゲートではない、§9.3）。(5) **[Major]** **tool-less channel server の load 可否は未検証 load-bearing 仮定**（prior art は tools+channel 同梱）→ **HARD pre-ratification spike ゲート K1**（不成立なら同梱形へ fallback）。(6) **[Major]** dev-channel 廃止は **ratified ではなく未批准提案**（Set D は dev-channel injection を依然 MUST）→ β は「提案の撤回」であり「批准済決定の反転」ではない、と framing 是正（§9.5 / S3）。(7) **[Major]** §4(4)「切戻し 5 条件は増えない」は §9 下で偽 → 第 6 サブステップ（sidecar-reap + delivery_mode reset）を §5.5 に畳む補正（§9.7）。(8) claude.ai-login は **既存 billing 制約の範囲内**（新規 hard dep ではない）、experimental capability への依存は結合の relocate（pull-first が構造的保険）と明示。
