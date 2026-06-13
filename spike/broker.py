@@ -91,6 +91,15 @@ _CLAUDE_TUI_VALUE_FLAGS = frozenset((  # 値を 1 つ取る対話 flag
     "--disallowed-tools", "--model", "--permission-mode", "--add-dir",
     "--append-system-prompt", "--settings", "--setting-sources", "--resume",
     "--session-id", "--agents",
+    # K1 spike (#22): push 一次配送の §9.5 spawn 儀式は channel sidecar を
+    # `--dangerously-load-development-channels server:<name>` で load する。これは
+    # **対話 TUI の正規 flag** (headless 系ではない。channel 注入は idle セッションを
+    # 起こすが課金中立 = 対話ターン)。allowlist に入れないと §9.5 ceremony が
+    # `[headless_forbidden]` で false-reject される (K1 実機で確認済)。値は 1 つの
+    # `server:<name>`。**複数チャネル同時 load (coexist テストの multi-value 形) は
+    # 本 guard の対象外** = 本番 broker 枝の agent は org-broker-channel 単一を load する
+    # (§9.1: renga は別 transport 枝で自前 dev-channel を保持し co-load しない)。
+    "--dangerously-load-development-channels",
 ))
 _CLAUDE_TUI_BOOL_FLAGS = frozenset((  # 値を取らない対話 flag
     "--strict-mcp-config", "--dangerously-skip-permissions", "--ide",

@@ -112,3 +112,35 @@ py -3 manual_ime_session.py
   詳細 [`ac9-wezterm-evidence.md`](./ac9-wezterm-evidence.md) §5 / #540)、
   tmux は専用 socket (`-L claude-org-spike`) 上の新規 detached session を使い、
   既存 tmux サーバーとも分離する。
+
+## Phase K1（push 一次配送の批准前 HARD ゲート / Issue #22）
+
+設計 SoT: [`broker-native-roles.md`](../docs/design/broker-native-roles.md) §9.5 /
+[`ja-migration-plan.md`](../docs/design/ja-migration-plan.md) §8 K1 行。
+
+**tool-less** な `claude/channel` stdio サーバー（ツール宣言ゼロ・`experimental{claude/channel}`
+のみ）を `--dangerously-load-development-channels` で load し、idle セッションを **能動 poll なしに**
+push で起こせるかの実機ゲート。判定の正本は [`RESULTS.md`](./RESULTS.md) の Phase K1 節。
+
+| ファイル | 役割 |
+|---|---|
+| `k1_daemon.py` | push 一次配送 daemon（配送ライフサイクル §9.3 + delivery-scoped credential §9.4）。stdlib・localhost・隔離 state-dir |
+| `channel_sidecar.py` | **tool-less** `claude/channel` stdio MCP サーバー（K1 の核心）。claim→push→confirm |
+| `run_k1.py` | AC-1/2/4 実機ハーネス（実 claude TUI を tmux に spawn・反証可能な idle-wake 観測） |
+| `run_k1_coexist.py` | AC-3 実機ハーネス（org-broker-channel + 隔離した実 claude-peers を同居 load） |
+| `k1_smoke.py` | 配管スモーク（無課金・claude 不要） |
+
+```bash
+# 無課金・決定的（CI 常設）
+python3 -m unittest discover -s tests -p "test_k1_channel.py"
+python3 spike/k1_smoke.py
+
+# 実機（WSL2 / tmux・課金あり・最小トークン）
+cd spike
+python3 run_k1.py --model sonnet            # AC-1/2/4: tool-less load + idle wake + 課金中立
+python3 run_k1_coexist.py --model sonnet    # AC-3: renga(claude-peers 隔離実体) と coexist
+```
+
+実機検証は WSL2 / tmux（本番ホスト WezTerm 実機 AC は別 Issue #9）。broker daemon は
+repo 外 WSL パス（`/tmp/claude/broker-k1-spike/*`）を `--state-dir` で渡し、本番 ja `.state/`・
+本番 `~/.claude-peers.db` に一切触れず、検証後に破棄する。
