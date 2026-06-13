@@ -224,6 +224,11 @@ def run_coexist(model: str, wake_timeout: float) -> dict:
                 pass
         if broker_proc is not None:
             broker_proc.terminate()
+            try:
+                broker_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                broker_proc.kill()
+                broker_proc.wait(timeout=5)
         if broker_log is not None:
             broker_log.close()
         if srv is not None:

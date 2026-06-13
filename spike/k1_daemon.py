@@ -149,6 +149,10 @@ class Daemon:
         if cred.scope != "delivery":
             return {"ok": False, "error": "forbidden_scope"}
         with self._lock:
+            # lease 失効した claim を先に reap（reaper は poll 系でしか走らないため、ここで
+            # 明示的に回す）。これにより「lease 切れの stale claim を confirm で DELIVERED 化」
+            # を構造的に閉じる: 失効 claim は UNDELIVERED へ戻り、後段の state==CLAIMED 検査で拒否される。
+            self._reap_locked()
             row = self.rows.get(rid)
             if row is None:
                 return {"ok": False, "error": "unknown_row"}

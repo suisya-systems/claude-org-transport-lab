@@ -49,25 +49,28 @@ class DeliveryLifecycleTests(unittest.TestCase):
         self.assertTrue(res["ok"])
         self.assertEqual(self.d.rows[rid].state, DELIVERED)
 
-    def test_confirm_rejects_unclaimed_or_reaped_row(self):
-        # §9.3: confirm は live な claim に紐づく行のみ確定できる（未 claim / reap 後は不可）
+    def test_confirm_rejects_unclaimed_row(self):
+        # §9.3: 未 claim(UNDELIVERED) の行を confirm できない
         rid = self.d.enqueue("w", "x", {})
-        # 未 claim のまま confirm -> not_claimed
         res = self.d.confirm_delivered(self.cred, rid, self.d.epoch)
         self.assertFalse(res["ok"])
         self.assertEqual(res["error"], "not_claimed")
         self.assertEqual(self.d.rows[rid].state, UNDELIVERED)
-        # claim -> reap(lease 失効で UNDELIVERED へ戻る) -> 旧 claim epoch での confirm は不可
+
+    def test_confirm_rejects_lease_expired_claim(self):
+        # lease 失効後の stale claim を **reaper 未実行のまま** confirm しても DELIVERED 化しない。
+        # confirm_delivered 内の明示 reap が失効 claim を UNDELIVERED へ戻し拒否する（沈黙喪失防止）。
         d = _daemon(self.tmp, lease=0.3)
         cred = d.creds[d.issue_cred("w", "delivery")]
-        rid2 = d.enqueue("w", "y", {})
-        c = d.poll_claims(cred)["rows"][0]
-        time.sleep(0.4)
-        d.poll_claims(cred)            # reap を走らせる（再 claim される）
-        # 旧 epoch/claim での confirm は現在の claim と一致しないので拒否されないこと自体は許容だが、
-        # 少なくとも reap 直後（未 confirm）の DELIVERED 化が happy-path 以外で起きないことを担保。
-        self.assertNotEqual(d.rows[rid2].state, DELIVERED)
-        _ = c
+        rid = d.enqueue("w", "y", {})
+        c = d.poll_claims(cred)["rows"][0]      # CLAIMED, lease=now+0.3
+        self.assertEqual(d.rows[rid].state, CLAIMED)
+        time.sleep(0.45)                        # lease 失効（poll を挟まないので reaper は未実行）
+        res = d.confirm_delivered(cred, rid, c["epoch"])
+        self.assertFalse(res["ok"])             # 失効 claim の confirm は拒否
+        self.assertEqual(res["error"], "not_claimed")
+        self.assertNotEqual(d.rows[rid].state, DELIVERED)
+        self.assertEqual(d.rows[rid].state, UNDELIVERED)  # 再 eligible（回復可能）
 
     def test_confirm_is_idempotent(self):
         rid = self.d.enqueue("w", "x", {})
