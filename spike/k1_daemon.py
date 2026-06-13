@@ -89,7 +89,8 @@ class Daemon:
     def _auth(self, token: str | None) -> Cred | None:
         if not token:
             return None
-        return self.creds.get(token)
+        with self._lock:           # creds は issue_cred がロック下で書くため読みもロック下に揃える
+            return self.creds.get(token)
 
     # --------------------------------------------------------------- enqueue
     def enqueue(self, to_id: str, content: str, meta: dict) -> str:
@@ -99,7 +100,9 @@ class Daemon:
                 id=rid, to_id=to_id, content=content, meta=dict(meta or {}),
                 enqueued_at=round(time.time(), 3),
             )
-        self._journal("enqueue", id=rid, to_id=to_id, bytes=len(content))
+            # journal もロック下で（並行 poll_claims の 'claimed' が 'enqueue' を追い越し、
+            # 証跡 jsonl の lifecycle 順序が乱れるのを防ぐ）
+            self._journal("enqueue", id=rid, to_id=to_id, bytes=len(content))
         return rid
 
     # ------------------------------------------------------------- reaping
@@ -279,6 +282,10 @@ def make_handler(daemon: Daemon):
                 return self._send(200, daemon.flip_mode(body["mode"]))
 
             if path == "/dump":
+                # 横断トポロジ（owner/state）を晒すため admin scope に限定（§9.4 least-privilege:
+                # delivery-scoped cred からは到達不能）。ハーネスは in-process で daemon.dump() を呼ぶ。
+                if cred is None or cred.scope != "admin":
+                    return self._send(401, {"error": "unauthorized"})
                 return self._send(200, daemon.dump())
 
             return self._send(404, {"error": "not_found"})

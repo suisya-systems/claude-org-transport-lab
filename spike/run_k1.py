@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -47,6 +48,46 @@ def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+def make_wake_probe(channel_tag: str) -> dict:
+    """反証可能な wake プローブを 1 つ作る。
+
+    advisor + 事前 adversarial review の指摘への対処: 「push 本文に nonce を verbatim で
+    埋めて `nonce in screen` で判定」すると、**注入メッセージの echo（`← src: …<nonce>`）が
+    描画された瞬間に** モデルのターン無しでも substring が一致してしまう（echo confound）。
+    そこで grep 対象を push 本文に **構造的に存在しない変換後トークン** にする:
+
+      - base = 小文字 hex（英字を必ず含む）。push 本文には base（小文字）を載せ、
+        「これを **大文字** にして 1 行で出力せよ」と指示する。
+      - 検出対象 target = base.upper()。**target は本文（小文字 base）に部分文字列として現れない**ため、
+        画面に target が出現する = モデルが実際にターンを起こして変換出力した、以外にありえない。
+        注入 echo（小文字）では決して一致しない。tool-less ゆえツール poll 経路も無い。
+    """
+    base = uuid.uuid4().hex[:8]
+    while base.upper() == base:        # 英字を含み大文字化で必ず変わることを保証
+        base = uuid.uuid4().hex[:8]
+    target = base.upper()
+    content = (
+        f"A push message arrived on channel {channel_tag}. Acknowledge by outputting "
+        f"ONLY this token converted to UPPERCASE, on its own line, nothing else: {base}"
+    )
+    return {"base": base, "target": target, "content": content}
+
+
+def scan_wake(screen: str, target: str) -> dict:
+    """target（大文字変換後トークン）が **注入行以外** に出現したかを判定。
+
+    注入メッセージ行は TUI で `←`（incoming）プレフィックスで描画される。target は本文に
+    無いので出現自体が model turn の証拠だが、念のため `←` 行を除外して assistant 出力上の
+    出現も別途記録する（belt-and-suspenders）。
+    """
+    appeared = target in screen
+    on_non_injection_line = any(
+        target in ln and not ln.lstrip().startswith("←")
+        for ln in screen.splitlines()
+    )
+    return {"appeared": appeared, "on_assistant_line": on_non_injection_line}
+
+
 def approve_prompts_until_idle(adapter, pane_id, t0, timeout=120.0, evidence_dir=None):
     """起動プロンプト (folder trust / dev-channel 危険確認 / MCP 承認) を機械承認し idle 到達。
 
@@ -60,6 +101,7 @@ def approve_prompts_until_idle(adapter, pane_id, t0, timeout=120.0, evidence_dir
            "mcp_approve_prompt": False, "approved_mechanically": False,
            "ready_seconds": None, "prompt_texts": []}
     dump_idx = 0
+    idle_streak = 0          # 連続 idle フレーム数（単一フレームの誤検出を避ける settle 要件）
     while time.monotonic() < deadline:
         screen = adapter.get_text(pane_id)
         low = screen.lower()
@@ -97,19 +139,29 @@ def approve_prompts_until_idle(adapter, pane_id, t0, timeout=120.0, evidence_dir
             adapter.send_enter(pane_id)
             obs["approved_mechanically"] = True
             last_action = now
+            idle_streak = 0
         elif classify_pane_state(screen) == "idle":
-            obs["ready_seconds"] = round(now - t0, 1)
-            log(f"claude reached idle in {obs['ready_seconds']}s")
-            return True, obs
+            idle_streak += 1
+            # settle: 2 連続 idle フレームを要求（プロンプト遷移中の単一フレーム誤検出を排除）
+            if idle_streak >= 2:
+                obs["ready_seconds"] = round(now - t0, 1)
+                obs["idle_settle_frames"] = idle_streak
+                log(f"claude reached idle (settled {idle_streak} frames) in {obs['ready_seconds']}s")
+                return True, obs
+        else:
+            idle_streak = 0
         time.sleep(1.0)
     return False, obs
 
 
-def ps_argv_for_pane(pane_id: str) -> list[str]:
-    """実 claude プロセスの argv を ps で採取 (課金中立 attestation)。
+def ps_argv_for_claude(cfg_path: str) -> list[str]:
+    """**自分が spawn した** claude プロセスの実 argv を ps で採取 (課金中立 attestation)。
 
-    tmux ラッパー行ではなく、**argv[0] の basename が claude** の実プロセス行を採る
-    (= 起動された claude 本体の実 argv。headless flag 不在の直接証跡)。
+    重要: 本マシンには renga 組織の別 claude セッションが多数走っているため、単に
+    'argv[0]==claude' で拾うと **他セッションの argv（Bearer token を含みうる）を誤取得**する。
+    自分の一意な `--mcp-config <cfg_path>`（scratch のファイルパス）を含む行のみに限定し、
+    かつ取り違え防止に dev-channel flag の存在も要求する。自分の argv に平文 token は無い
+    (token は config ファイルの env 側。argv はクリーン)。
     """
     try:
         out = subprocess.run(
@@ -120,10 +172,41 @@ def ps_argv_for_pane(pane_id: str) -> list[str]:
         toks = line.split()
         if not toks:
             continue
-        # tmux ラッパー / sidecar は除外。argv[0] が claude 本体の行のみ採る。
-        if toks[0].rsplit("/", 1)[-1] == "claude" and "--mcp-config" in toks:
+        if (toks[0].rsplit("/", 1)[-1] == "claude"
+                and cfg_path in toks
+                and "--dangerously-load-development-channels" in toks):
             return toks
     return []
+
+
+SPIKE_DIR = Path(__file__).resolve().parent
+REPO_EVIDENCE = SPIKE_DIR / "k1-evidence"
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+
+def write_committed_evidence(name: str, after: str, result: dict, targets: list[str]) -> Path:
+    """wake 証跡を repo 追跡ディレクトリへ **PII 除去のうえ** 抜粋保存（再現可能・durable）。
+
+    生 pane ダンプは claude の welcome box にユーザーの email/氏名を含むため repo には入れない。
+    wake を区別する load-bearing 行（注入 `←` / アシスタント出力 `●` / 変換後 target /
+    `Baked`/`Cooking` スピナー / idle `❯`）だけを email 伏字で残す。
+    """
+    out = REPO_EVIDENCE / name
+    out.mkdir(parents=True, exist_ok=True)
+    keep = []
+    for ln in after.splitlines():
+        s = ln.strip()
+        if (s.startswith("←") or s.startswith("●") or "Baked" in s or "Cooking" in s
+                or "❯" in s or any(t in ln for t in targets)
+                or "inject directly in this session" in s):
+            keep.append(_EMAIL_RE.sub("<redacted-email>", ln.rstrip()))
+    (out / "wake-excerpt.txt").write_text(
+        "# K1 wake 証跡（抜粋・email 伏字）。生ダンプは実行時 /tmp/claude/broker-k1-spike に生成\n"
+        f"# transform targets（push 本文に存在しない＝モデル出力でのみ一致）: {targets}\n\n"
+        + "\n".join(keep) + "\n", encoding="utf-8")
+    (out / "result.json").write_text(
+        json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+    return out
 
 
 def run_isolation(model: str, wake_timeout: float) -> dict:
@@ -189,7 +272,7 @@ def run_isolation(model: str, wake_timeout: float) -> dict:
             return result
 
         # --- AC4 billing attestation: 実 argv に headless flag が無いこと ---
-        real_argv = ps_argv_for_pane(pane.pane_id)
+        real_argv = ps_argv_for_claude(str(cfg_path))
         headless = [f for f in ("-p", "--print", "--headless", "--output-format",
                                 "--input-format")
                     if f in real_argv]
@@ -202,40 +285,38 @@ def run_isolation(model: str, wake_timeout: float) -> dict:
         }
         (evid / "idle-before.txt").write_text(idle_screen, encoding="utf-8")
 
-        # --- AC2: 反証可能な idle-wake ---
-        nonce = f"WOKE-K1-{uuid.uuid4().hex[:8]}"
-        result["nonce"] = nonce
-        # 重要: idle 到達後、pane には *一切入力しない*。push のみで起こす。
-        content = (
-            "A message arrived on your push channel. To acknowledge, output this "
-            f"exact token on its own line, nothing else: {nonce}"
-        )
-        log(f"enqueue nonce elicitation (owner={OWNER}); NO input will be typed")
-        d.enqueue(OWNER, content, {"from_id": "observer", "kind": "k1-wake"})
+        # --- AC2: 反証可能な idle-wake（transform プローブ） ---
+        probe = make_wake_probe(SOURCE_NAME)
+        result["probe"] = {"base": probe["base"], "target": probe["target"]}
+        # 重要: idle 到達後、pane には *一切入力しない*（send-keys/type を一切呼ばない）。push のみで起こす。
+        log(f"enqueue transform probe (owner={OWNER}); base={probe['base']} "
+            f"target={probe['target']}; NO input will be typed")
+        t_enq = time.monotonic()
+        d.enqueue(OWNER, probe["content"], {"from_id": "observer", "kind": "k1-wake"})
 
         deadline = time.monotonic() + wake_timeout
-        woke = False
+        scan = {"appeared": False, "on_assistant_line": False}
         while time.monotonic() < deadline:
             scr = adapter.get_text(pane.pane_id)
-            if nonce in scr:
-                woke = True
+            scan = scan_wake(scr, probe["target"])
+            if scan["appeared"]:
                 break
             time.sleep(1.0)
         after = adapter.get_text(pane.pane_id)
         (evid / "wake-after.txt").write_text(after, encoding="utf-8")
 
-        # daemon 側で行が DELIVERED まで進んだか
         dump = d.dump()
         delivered = sum(1 for r in dump["rows"] if r["state"] == "DELIVERED")
         result["ac2_idle_wake"] = {
-            "nonce_appeared_in_session": woke,
-            "no_input_typed": True,           # 構造的: idle 後 send-keys/type は呼ばない
-            "channel_source_rendered": f'source="{SOURCE_NAME}"' in after
-                                       or SOURCE_NAME in after,
+            # target（大文字変換後）は push 本文に無いため、出現 = モデルが実ターンで変換出力した証拠
+            "transform_target_emitted_by_model": scan["appeared"],
+            "target_on_assistant_line": scan["on_assistant_line"],
+            "no_input_typed_after_idle": True,   # 構造的不変: idle 後 send-keys/type/enter を一切呼ばない
+            "tool_less_no_poll_path": True,      # sidecar はツール非公開 = check_messages 等が存在しない
+            "channel_source_rendered": SOURCE_NAME in after,
             "daemon_rows_delivered": delivered,
-            "seconds_to_wake": (round(time.monotonic() - (deadline - wake_timeout), 1)
-                                if woke else None),
-            "pass": bool(woke),
+            "seconds_to_wake": round(time.monotonic() - t_enq, 1) if scan["appeared"] else None,
+            "pass": bool(scan["appeared"]),
         }
         return result
     finally:
@@ -259,6 +340,11 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "result.json").write_text(
         json.dumps(res, indent=2, ensure_ascii=False), encoding="utf-8")
+    targets = [res.get("probe", {}).get("target", "")]
+    after_path = out_dir / "wake-after.txt"
+    after = after_path.read_text(encoding="utf-8") if after_path.exists() else ""
+    committed = write_committed_evidence("isolation", after, res, [t for t in targets if t])
+    print(f"committed evidence: {committed}")
     print(json.dumps(res, indent=2, ensure_ascii=False))
 
     ac1 = res.get("ac1_tool_less_load_and_approve")

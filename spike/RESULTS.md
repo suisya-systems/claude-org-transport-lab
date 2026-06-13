@@ -541,49 +541,48 @@ viewport 全高を返すため busy ヒントの下部寄せが必要）等の�
 
 ## Phase K1 / AC-K1（push 一次配送の批准前 HARD ゲート / Issue #22）
 
-push 一次配送（`claude/channel`）への再設計（[`broker-native-roles.md`](../docs/design/broker-native-roles.md) §9 / [`ja-migration-plan.md`](../docs/design/ja-migration-plan.md) §8 K1）の **批准前 HARD ゲート**。検証する load-bearing 仮定（§9.5）: Claude Code harness が (i) **tool-less** な（ツール宣言ゼロで `experimental{claude/channel}` のみ宣言する）stdio サーバーを `--dangerously-load-development-channels` 下で **load するか**、(ii) その `notifications/claude/channel` が **idle セッションを能動 poll なしに起こすか**、(iii) **renga と coexist するか**、(iv) **課金中立**か。**prior art（claude-peers-mcp）は tools と channel を 1 サーバーに同梱**しており、tool-less 単独 channel サーバーの先例が無い（これが核心）。FAIL なら §9.5 の design fallback（tools+channel 同梱形）へ倒すのが正当な完了。
+push 一次配送（`claude/channel`）への再設計（[`broker-native-roles.md`](../docs/design/broker-native-roles.md) §9.5 / [`ja-migration-plan.md`](../docs/design/ja-migration-plan.md) §8 K1）の **批准前 HARD ゲート**。検証する load-bearing 仮定（§9.5）: Claude Code harness が (i) **tool-less**（ツール宣言ゼロで `experimental{claude/channel}` のみ宣言する）stdio サーバーを `--dangerously-load-development-channels` 下で **load するか**、(ii) その `notifications/claude/channel` が **idle セッションを能動 poll なしに起こすか**、(iii) **renga と coexist するか**、(iv) **課金中立**か。**prior art（claude-peers-mcp）は tools と channel を 1 サーバーに同梱**しており、tool-less 単独 channel サーバーの先例が無い（これが核心）。FAIL なら §9.5 の design fallback（tools+channel 同梱形）へ倒すのが正当な完了。
 
 - 実施日: 2026-06-13
 - 環境: WSL2（Linux 6.18 / `DESKTOP-1S0KAQD`）/ **tmux 3.4**（専用 socket `-L claude-org-spike`）/ **Claude Code 2.1.177**（channel 機能の min version は v2.1.80）/ Python 3.12.3 / 検証モデル: **Sonnet 4.6**（対話 TUI・最小トークン）
-- 隔離: broker daemon は repo 外 WSL パス `--state-dir=/tmp/claude/broker-k1-spike/*` で起動（port=0 で空きポート）。本番 ja `.state/` および本番 `~/.claude-peers.db` には**一切触れていない**（AC-3 で mtime 不変を attestation）。
-- 判定スクリプト（実機・課金あり）: [`run_k1.py`](./run_k1.py)（AC-1/2/4 isolation）/ [`run_k1_coexist.py`](./run_k1_coexist.py)（AC-3）。機械可読の正本は `/tmp/claude/broker-k1-spike/{isolation,coexist}/evidence/result.json` + 画面ダンプ（git 管理外・実機でのみ再生成）。
-- CI 常設（無課金・決定的・claude 不要）: [`tests/test_k1_channel.py`](../tests/test_k1_channel.py)（daemon 配送ライフサイクル §9.3 + delivery-scoped credential §9.4 + tool-less sidecar subprocess の計 10 ケース green）+ [`k1_smoke.py`](./k1_smoke.py)（配管スモーク）。実 claude の idle-wake は CI 非常設（課金）。
+- 隔離: broker daemon は repo 外 WSL パス `/tmp/claude/broker-k1-spike/*`（port=0 空きポート）。本番 ja `.state/` および本番 `~/.claude-peers.db` には**一切触れていない**（AC-3 で mtime 不変を attestation）。
+- 判定スクリプト（実機・課金あり）: [`run_k1.py`](./run_k1.py)（AC-1/2/4 isolation）/ [`run_k1_coexist.py`](./run_k1_coexist.py)（AC-3）。
+- **committed 証跡（PII 除去・durable）**: [`k1-evidence/`](./k1-evidence)（`{isolation,coexist}/wake-excerpt.txt` = wake を区別する load-bearing 行のみ抜粋・email 伏字 + `result.json`）。生 pane ダンプは実行時に `/tmp/claude/broker-k1-spike/*` へ生成（claude welcome box に PII を含むため repo 非追跡）。
+- CI 常設（無課金・決定的・claude 不要）: [`tests/test_k1_channel.py`](../tests/test_k1_channel.py)（15 ケース green: daemon 配送ライフサイクル §9.3 + delivery-scoped credential §9.4 + tool-less sidecar subprocess + **実 sidecar の emit-without-confirm→lease reap→回復の end-to-end** + **課金中立 allowlist 回帰**）+ [`k1_smoke.py`](./k1_smoke.py)。
 
-### 実装差分（新規 spike 構成物）
+### 反証可能な wake 観測（transform プローブ）— 事前 adversarial review への対処
 
-| ファイル | 役割 |
-|---|---|
-| [`k1_daemon.py`](./k1_daemon.py) | push 一次配送 daemon（§9.2 の daemon=権威）。配送ライフサイクル `UNDELIVERED→CLAIMED(lease)→DELIVERED`（claim-with-lease / 配達確定は emit の*後* / lease reaping で sidecar 死亡回復 / mode-epoch fencing / delivery-scoped credential / pull フォールバック）。stdlib のみ・localhost bind・隔離 state-dir |
-| [`channel_sidecar.py`](./channel_sidecar.py) | **K1 の核心**。**tool-less** な `claude/channel` stdio MCP サーバー（§9.2 の sidecar=配送）。`experimental{claude/channel}` のみ宣言・ツール一切なし。~1s で daemon を claim→`notifications/claude/channel` emit→confirm。delivery-scoped credential を env 受け取り |
-| [`run_k1.py`](./run_k1.py) | AC-1/2/4 実機ハーネス。実 claude TUI を tmux に spawn → dev-channel 機械承認 → idle → **pane に一切入力せず** nonce 注入を push → 反証可能な wake 観測 |
-| [`run_k1_coexist.py`](./run_k1_coexist.py) | AC-3 実機ハーネス。1 セッションに org-broker-channel（本 spike）+ 隔離した**実 prior art** claude-peers を同居 load し 2 系へ push |
-| [`tests/test_k1_channel.py`](../tests/test_k1_channel.py) | 上記 daemon/sidecar の決定的 CI テスト（無課金） |
+初版は push 本文に nonce を verbatim 埋め `nonce in screen` で判定していたが、**注入メッセージの echo（`← src: …<nonce>`）が描画された瞬間にモデルのターン無しでも substring が一致する** echo confound があった（実際、初版 coexist run は echo で false-positive PASS していた）。対処として grep 対象を push 本文に **構造的に存在しない変換後トークン**に変更した:
 
-### AC-K1 検証項目 — **総合 GO（全 4 項目 PASS）**
+- push 本文に小文字 hex `base`（英字必須）を載せ「これを **大文字**にして 1 行で出力せよ」と指示。検出対象 `target = base.upper()` は本文（小文字）に部分文字列として現れない。
+- ゆえに画面に `target` が出現する = **モデルが実ターンで変換出力した以外にありえない**（注入 echo は小文字で一致しない）。`scan_wake` は `←` 注入行を除外したアシスタント行上の出現も別記録する。
+
+### AC-K1 検証項目 — **総合 GO（全 4 項目 PASS / 反証可能な実機証跡）**
 
 | # | 項目 | 判定 | 実機根拠 |
 |---|---|---|---|
-| AC-1 | tool-less `claude/channel` を spawn 経路で load + dev-channel 機械承認（§9.5 / 3-3b） | **PASS** | `--mcp-config <tool-less sidecar> --strict-mcp-config --dangerously-load-development-channels server:org-broker-channel` で spawn。harness が tool-less サーバーを load し、idle 到達 **5.4s**。起動プロンプトは (a) folder trust（"Yes, I trust this folder"）+ (b) dev-channel 警告（"WARNING: Loading development channels … 1. I am using this for local development"）の 2 種で、**いずれも `send-keys`（"1"+Enter）で機械承認**。banner `Channels (experimental) messages from server:org-broker-channel inject directly in this session` を実画面で確認 |
-| AC-2 | idle セッションに daemon queue→sidecar claim→push で in-band 注入し、**能動 poll なしに**起きる | **PASS（反証可能に実証）** | idle 到達後 pane へ**一切入力せず**、daemon に nonce 出力要求を enqueue。sidecar が claim→emit→confirm（daemon journal: enqueue→claimed→delivered）。**4.0s 後**にセッションが自発ターンを起こし `● WOKE-K1-78038792`（`✻ Baked for 3s`）を出力 → idle 復帰。**tool-less ゆえセッションには poll する手段（check_messages）が構造的に存在せず**、nonce 出現は push 以外ありえない（poll 混入の余地ゼロ） |
-| AC-3 | renga と coexist（同一マシンで renga 経路と broker push 経路が干渉しない） | **PASS** | 1 セッションに org-broker-channel（tool-less）+ **隔離した実 claude-peers**（prior art の実コードを `CLAUDE_PEERS_DB/PORT/TOKEN` で別 db/port/token に隔離 = renga と同型の channel 実装）を同居 load（dev-channel 警告は "Channels: server:org-broker-channel, server:claude-peers" と両者を 1 プロンプトに列挙）。2 系へ固有 nonce を push し **両方が起き**（`← org-broker-channel: … WOKE-OBC-6d257c` / `← claude-peers: … WOKE-CP-11cd9c`）、source で区別され互いを block しない。**本番 `~/.claude-peers.db` の mtime は不変**（machine-level non-interference attestation） |
-| AC-4 | 課金中立: 対話型 TUI・実 argv で attestation | **PASS** | 実 claude プロセスの ps 実 argv = `claude --mcp-config <cfg> --strict-mcp-config --dangerously-load-development-channels server:org-broker-channel --model sonnet`。`-p`/`--print`/`--headless`/`--output-format`/`--input-format` を**一切含まない**。起動直後 idle で `❯` 対話プロンプトを描画（ヘッドレス print-and-exit なら描画されない）。channel 注入は idle を起こすが**ターンは対話 TUI ターン**であり課金中立 |
+| AC-1 | tool-less `claude/channel` を spawn 経路で load + dev-channel 機械承認（§9.5 / 3-3b） | **PASS** | `--mcp-config <tool-less sidecar> --strict-mcp-config --dangerously-load-development-channels server:org-broker-channel` で spawn。harness が tool-less サーバーを load し idle 到達（settle: 2 連続 idle フレーム要求）。起動プロンプトは (a) folder trust + (b) dev-channel 警告（"WARNING: Loading development channels … 1. I am using this for local development"）の 2 種で、**いずれも `send-keys`（"1"+Enter）で機械承認**。banner `Channels (experimental) messages from server:org-broker-channel inject directly in this session` を実画面で確認 |
+| AC-2 | idle に daemon queue→sidecar claim→push で in-band 注入し、**能動 poll なしに**起きる | **PASS（反証可能に実証）** | idle 到達後 pane へ**一切入力せず**、transform プローブ（base 小文字 → 大文字 target 出力要求）を enqueue。sidecar が claim→emit→confirm（daemon journal: enqueue→claimed→delivered）。**3.0s 後**にセッションが自発ターンで大文字 target（例 `● B32C12B7`、base=`b32c12b7`）を出力 → idle 復帰。**target は push 本文に無い**ため出現はモデルの実ターン以外ありえず、echo では一致しない。**加えて** tool-less ゆえセッションには `check_messages` 等の poll ツールが構造的に存在せず、ツール経由 poll 経路も排除（二重の反証）。committed: `k1-evidence/isolation/wake-excerpt.txt` |
+| AC-3 | renga と coexist（同一マシンで renga 経路と broker push 経路が干渉しない） | **PASS** | 1 セッションに org-broker-channel（tool-less）+ **隔離した実 claude-peers**（prior art の実コードを `CLAUDE_PEERS_DB/PORT/TOKEN` で別 db/port/token に隔離 = renga と同型の channel 実装）を同居 load（dev-channel 警告は両者を 1 プロンプトに列挙）。2 系へ別々の transform プローブを push し、**両方ともモデルが実ターンで変換出力**（`← org-broker-channel:`→`● 592D9B05` / `← claude-peers:`→`● B31DB427`）、source で区別され互いを block しない。**本番 `~/.claude-peers.db` の mtime は不変**。committed: `k1-evidence/coexist/wake-excerpt.txt` |
+| AC-4 | 課金中立: 対話型 TUI・実 argv で attestation | **PASS** | **自分が spawn した** claude プロセス（一意な scratch `--mcp-config` パスで識別。本マシンの他 renga セッション誤取得を回避）の ps 実 argv = `claude --mcp-config <cfg> --strict-mcp-config --dangerously-load-development-channels server:org-broker-channel --model sonnet`。`-p`/`--print`/`--headless`/`--output-format`/`--input-format` を**一切含まない**。起動直後 idle で `❯` 対話プロンプトを描画。自分の argv に平文 token は無い（token は config ファイルの env 側） |
 
 ### §9.5 設計仮定への実測フィードバック
 
-1. **核心仮定 (i)(ii) は成立 — fallback 不要**: §9.5 は「tool-less 単独 channel サーバーの先例が無い」「(i) 不成立なら claude-peers 形（tools+channel 同梱）へフォールバック」とした。実機で **tool-less 単独 channel サーバーが load され idle wake した**ため、**§9.5 の design fallback は発動しない**（delivery-scoped credential / sidecar droppable の §9.4 least-privilege をそのまま採れる）。
-2. **公式ドキュメント追認**: Claude Code 公式 docs（`/en/channels` / `/en/channels-reference`）は本ゲート後の調査時点で tool-less one-way channel（`capabilities.tools` 省略）・`notifications/claude/channel` の idle wake・複数 dev-channel 同居を**明文サポート**として記載。ただし K1 は HARD *実機*ゲートであり、判定は**ドキュメントではなく上表の実機証跡**による（docs は補強材料）。
-3. **観測した cosmetic 挙動（PASS を覆さない）**: tool-less サーバーは TUI の MCP **ツールサーバー**一覧に出ず `server:org-broker-channel · no MCP server configured with that name` という紛らわしい banner が併記される。だが channel capability は登録され push 注入は正常に機能する（tools を持つ claude-peers では当該 banner は出ない → ツールサーバー registry view の表示差であり channel 機能とは独立）。本体取り込み時の運用ドキュメントに既知 cosmetic として記す。
-4. **課金中立 allowlist の保守契約更新**: Phase 5 の対話 TUI argv allowlist（`broker.is_interactive_claude_argv` / `_CLAUDE_TUI_VALUE_FLAGS`）に **`--dangerously-load-development-channels`（値 `server:<name>`）を追加**した。§9.5 の spawn 儀式はこの flag で channel sidecar を load するため、未追加だと正規の対話起動が `[headless_forbidden]` で false-reject される（headless 系ではないため allowlist 追加は安全）。本体（claude-org-runtime）取り込み時に同契約を継承する。
+1. **核心仮定 (i)(ii) は成立 — fallback 不要**: 実機で **tool-less 単独 channel サーバーが load され idle wake した**ため、**§9.5 の design fallback（tools+channel 同梱形）は発動しない**。delivery-scoped credential / sidecar droppable（§9.4 least-privilege）をそのまま採れる。
+2. **公式ドキュメント追認（ただし判定は実機証跡による）**: Claude Code 公式 docs（`/en/channels` / `/en/channels-reference`）は tool-less one-way channel・`notifications/claude/channel` の idle wake・複数 dev-channel 同居を明文サポートとして記載。K1 は HARD *実機*ゲートであり、判定は上表の実機証跡による（docs は補強材料）。
+3. **観測した cosmetic（PASS を覆さない）**: tool-less サーバーは TUI の MCP **ツールサーバー**一覧に出ず `server:org-broker-channel · no MCP server configured with that name` という banner が併記されるが、channel capability は登録され push 注入は正常。tools を持つ claude-peers では当該 banner は出ない（registry view の表示差で channel 機能とは独立）。
+4. **課金中立 allowlist の保守契約更新**: Phase 5 の対話 TUI argv allowlist（`broker.is_interactive_claude_argv` / `_CLAUDE_TUI_VALUE_FLAGS`）に **`--dangerously-load-development-channels`（値 `server:<name>`）を追加**し、回帰テスト（許可: 単一 channel ceremony / 拒否: headless 併用・multi-value 形・bare positional）を `tests/test_k1_channel.py` に常設。本体（claude-org-runtime）取り込み時に同契約を継承する。
 
-### 既知の簡略化・境界（本実装スコープとの差）
+### 既知の簡略化・境界（本実装スコープとの差・honest scoping）
 
-- **K1 daemon は spike/broker.py とは別の K1 専用最小実装**: ゲート判定を読みやすく保つため、配送ライフサイクル（§9.3）と delivery-scoped credential（§9.4）だけを自己完結で実装した。本体取り込み（Issue A=R3 channel sidecar / B=R4 daemon delivery lifecycle）では既存 broker の token/queue 基盤へ統合する。
-- **実 claude の idle-wake は CI 非常設（課金）**: 決定的 CI は `tests/test_k1_channel.py`（daemon/sidecar 機構）で常設。実 claude の wake は `run_k1.py` の手動ランナーで実機実証。
-- **coexist multi-value flag は test 限定**: `--dangerously-load-development-channels server:A server:B` の複数 load は AC-3 テスト構成。**本番 broker 枝の agent は org-broker-channel 単一を load**（renga は別 transport 枝で自前 dev-channel を保持し co-load しない、§9.1）。allowlist は単一値形を許可する。
-- **`DELIVERED` の意味（§9.3 の過大主張回避）**: 本 spike の `confirm-delivered` は emit（stdout write）成功後に確定する。`notifications/claude/channel` の harness 受理〜可視注入の残余 window は at-least-once + 冪等表示が許容する範囲であり、本 K1 はその外側（idle セッションが実際に自発ターンを起こす）を nonce で実証した。
+- **K1 daemon は spike/broker.py とは別の K1 専用最小実装**: 配送ライフサイクル（状態機械 + claim-with-lease + lease reaping + mode-epoch fencing + delivery-scoped credential）に限る。**§9.3 の flapping/starvation 緩和（reclaim 上限超過の unhealthy 印字 → pull 退避）と §9.6 の heartbeat→PULL health モデルは未実装**（idle-wake を測るゲートのスコープ外）。`rows` は in-memory（`k1-queue.jsonl` は append-only・再起動 replay なし）であり daemon 再起動で未配達行を失う（durability は本体取り込み Issue B のスコープ）。本体取り込み（Issue A=R3 / B=R4）で既存 broker の token/queue 基盤へ統合する。
+- **`DELIVERED` の意味（過大主張の回避）**: 本 spike の `confirm-delivered` は emit（**sidecar の stdout flush**）成功後に確定する。これは設計 §9.3 が定義する「harness 受理」より上流の境界であり、flush→harness 受理→可視注入の残余 window は **closed ではなく narrowed**（design §9.3 の at-least-once + 冪等表示が許容する範囲）。冪等表示を実体化するため emit する `notifications/claude/channel` の meta に `msg_id`（daemon 行 id）を dedup key として載せた。lease reaping は「emit 後 confirm 前に sidecar が死亡」した行を UNDELIVERED へ戻し沈黙喪失を防ぐ（重複側に倒れる）— 実 sidecar subprocess の emit-without-confirm→reap→回復を CI で end-to-end 実証。
+- **§9.5 production spawn 構成（full tool server + sidecar 同居）は本ゲートのスコープ外**: 本 K1 が実証したのは **§9.5 (i)(ii) の tool-less channel-only の load+wake**（先例が無い核心の未知）。本番 §9.5 は `--mcp-config <daemon=全ツール incl. check_messages>` **と** dev-channel sidecar を同一セッションに載せる構成だが、その組合せ整合（full-tool セッションでも channel push が一次として効くか）は **Issue G dogfood のスコープ**であり本ゲートでは別途検証しない。tool-less 単独で wake する（= sidecar が full tool を要しない）ことは本ゲートが確定した。
+- **「能動 poll なし」は *セッション* の性質**: セッション自体は poll しない（push で起きる）。配送は channel sidecar の ~1s claim ループが媒介する（end-to-end zero-poll transport ではない）。machine-level 非干渉の一次担保は env plumbing（隔離 db/port/token）であり、mtime 不変はその corroborator。
+- **実機分は CI 非常設（課金）**: 決定的 CI は `tests/test_k1_channel.py`（15 ケース）で常設。実 claude の wake は `run_k1.py` / `run_k1_coexist.py` の手動ランナーで実機実証。
 
 ### 総合判定（Phase K1 / AC-K1）
 
-- **AC-K1: 全 4 項目 PASS**（tool-less load + 機械承認 / idle wake via push（反証可能）/ renga-equivalent coexist / 課金中立）。
-- **§9.5 HARD pre-ratification ゲート = PASS**。tool-less channel-only での idle wake が**実機で成立**したため、§9.5 の design fallback（tools+channel 同梱形）は不要。**Issue E（S3 契約批准 / P8・P9 prose land）および Issue G（dogfood + 既定反転）の前提条件を充足**。
-- 規律維持: 実機分は隔離 state-dir・本番 `.state/` / `~/.claude-peers.db` 不可触・対話 TUI のみ（ヘッドレス非該当）。決定的検証は無課金 CI（10 ケース）で常設化。
+- **AC-K1: 全 4 項目 PASS**（tool-less load + 機械承認 / idle wake via push（transform プローブで反証可能に実証）/ renga-equivalent coexist / 課金中立）。
+- **§9.5 HARD pre-ratification ゲート = PASS**。tool-less channel-only での idle wake が**実機で成立**したため §9.5 の design fallback は不要。**Issue E（S3 契約批准 / P8・P9 prose land）の前提条件（tool-less 仮定の成立）を充足**。本番 spawn 構成の dogfood 整合は Issue G スコープ。
+- 規律維持: 実機分は隔離 state-dir・本番 `.state/` / `~/.claude-peers.db` 不可触・対話 TUI のみ。決定的検証は無課金 CI（15 ケース）で常設化。

@@ -20,7 +20,8 @@ from pathlib import Path
 SPIKE = Path(__file__).resolve().parent.parent / "spike"
 sys.path.insert(0, str(SPIKE))
 
-from k1_daemon import Daemon, UNDELIVERED, CLAIMED, DELIVERED, PUSH, PULL  # noqa: E402
+from k1_daemon import Daemon, DaemonServer, UNDELIVERED, CLAIMED, DELIVERED, PUSH, PULL  # noqa: E402
+import broker as broker_mod  # noqa: E402
 
 
 def _daemon(tmp: Path, lease=5.0) -> Daemon:
@@ -96,17 +97,18 @@ class DeliveryLifecycleTests(unittest.TestCase):
         res = self.d.poll_claims(self.cred)
         self.assertEqual(res.get("error"), "push_disabled")   # 新規 claim 発行を拒否
 
-    def test_pull_fallback_drains_claim_respecting(self):
+    def test_pull_does_not_double_deliver_live_claim(self):
+        # live な sidecar claim 中の行は pull (check_messages) に出ない（二重配達しない）
         full = self.d.creds[self.d.issue_cred("w", "full")]
-        rid1 = self.d.enqueue("w", "a", {})
-        rid2 = self.d.enqueue("w", "b", {})
-        # 片方を live claim (sidecar 保持中) -> pull は live claim 行を返さない
-        self.d.poll_claims(self.cred)           # rid1, rid2 を CLAIMED
-        msgs = self.d.check_messages(full)["messages"]
-        self.assertEqual(msgs, [])              # CLAIMED 中は pull に出ない (二重配達しない)
-        # 並行 check_messages も二重ドレインしない: 同じ full cred で 2 回目は空
+        self.d.enqueue("w", "a", {})
+        self.d.poll_claims(self.cred)           # CLAIMED (lease 内)
         self.assertEqual(self.d.check_messages(full)["messages"], [])
-        _ = (rid1, rid2)
+        # 注: 並行 single-drainer 性は check_messages が _lock を drain 全体で保持することで担保（k1_daemon.py）。
+        # 本テストは serial idempotency（2 回目空）を確認する: drain 後 DELIVERED で再取得されない。
+        self.d.flip_mode(PULL)                  # push を止め pull 経路に倒す（in-flight は UNDELIVERED へ）
+        first = self.d.check_messages(full)["messages"]
+        self.assertEqual(len(first), 1)         # reaped row を pull が回収
+        self.assertEqual(self.d.check_messages(full)["messages"], [])  # 2 回目は空
 
     def test_spoof_from_is_ignored(self):
         # enqueue は to_id 宛先のみ。meta は本文付帯で、from 帰属は daemon の owner 由来。
@@ -190,6 +192,110 @@ class ToollessSidecarSubprocessTest(unittest.TestCase):
                     pass
         finally:
             srv.stop()
+
+
+class LeaseReapEndToEndTest(unittest.TestCase):
+    """fault sidecar が emit 後 confirm せず死亡 → lease reaping → fallback で回復（§9.3）。
+
+    in-process 単体だけでなく、実 sidecar subprocess を daemon(HTTP) に対して回し、
+    emit と confirm の間で死んだケースの **end-to-end** 回復を実証する。"""
+
+    def test_emit_without_confirm_recovers_via_reap(self):
+        state = Path("/tmp/claude/broker-k1-spike/ci/reap")
+        srv = DaemonServer(state, lease_seconds=0.6)
+        srv.start()
+        try:
+            cred = srv.daemon.issue_cred("w", "delivery")
+            full = srv.daemon.creds[srv.daemon.issue_cred("w", "full")]
+            env = {"PATH": "/usr/bin:/bin", "K1_DAEMON_URL": srv.url,
+                   "K1_DELIVERY_CRED": cred, "K1_OWNER": "w",
+                   "K1_POLL_INTERVAL": "0.2", "K1_SOURCE_NAME": "org-broker-channel",
+                   "K1_FAULT": "skip-confirm"}
+            proc = subprocess.Popen([sys.executable, str(SPIKE / "channel_sidecar.py")],
+                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                    stderr=subprocess.PIPE, env=env)
+            out = []
+
+            def reader():
+                for raw in proc.stdout:
+                    line = raw.decode("utf-8").strip()
+                    if line:
+                        try:
+                            out.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            pass
+            threading.Thread(target=reader, daemon=True).start()
+
+            def send(o):
+                proc.stdin.write((json.dumps(o) + "\n").encode())
+                proc.stdin.flush()
+
+            send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                  "params": {"protocolVersion": "2025-06-18", "capabilities": {}}})
+            send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+            time.sleep(0.4)
+            rid = srv.daemon.enqueue("w", "recover-me", {"from_id": "obs"})
+
+            # emit が来るのを待つ（faulty sidecar は emit するが confirm しない）
+            deadline = time.time() + 4
+            emitted = False
+            while time.time() < deadline:
+                if any(m.get("method") == "notifications/claude/channel" for m in out):
+                    emitted = True
+                    break
+                time.sleep(0.1)
+            self.assertTrue(emitted, "faulty sidecar should emit")
+            # confirm していないので DELIVERED にはなっていない
+            self.assertNotEqual(srv.daemon.rows[rid].state, DELIVERED)
+
+            # sidecar 死亡 -> 以後 claim されない
+            proc.stdin.close()
+            proc.kill()
+            proc.wait(timeout=3)
+            for s in (proc.stdout, proc.stderr):
+                try:
+                    s.close()
+                except OSError:
+                    pass
+
+            # lease 失効後、fallback(pull) が reap して回復（沈黙喪失しない）
+            time.sleep(1.0)
+            recovered = srv.daemon.check_messages(full)["messages"]
+            self.assertEqual([m["id"] for m in recovered], [rid])
+            self.assertEqual(srv.daemon.rows[rid].state, DELIVERED)
+        finally:
+            srv.stop()
+
+
+class BillingAllowlistTests(unittest.TestCase):
+    """K1 で追加した --dangerously-load-development-channels の課金中立 allowlist 回帰。
+
+    自己課す保守契約（RESULTS.md Phase 5 / K1 節）: allowlist 変更時は許可/拒否ケースを更新する。"""
+
+    def _argv(self, *extra):
+        return ["/home/x/.local/bin/claude", "--mcp-config", "/c",
+                "--strict-mcp-config", *extra, "--model", "sonnet"]
+
+    def test_single_channel_ceremony_accepted(self):
+        ok, why = broker_mod.is_interactive_claude_argv(
+            self._argv("--dangerously-load-development-channels", "server:org-broker-channel"))
+        self.assertTrue(ok, why)
+
+    def test_headless_still_rejected_even_with_channel_flag(self):
+        ok, _ = broker_mod.is_interactive_claude_argv(
+            ["claude", "-p", "--dangerously-load-development-channels", "server:x"])
+        self.assertFalse(ok)
+
+    def test_multi_value_coexist_form_rejected(self):
+        # coexist テストの複数 channel 同時 load 形は本番 spawn 経路では使わない（guard 対象外で拒否される）
+        ok, _ = broker_mod.is_interactive_claude_argv(
+            self._argv("--dangerously-load-development-channels",
+                       "server:a", "server:b"))
+        self.assertFalse(ok)
+
+    def test_bare_positional_still_rejected(self):
+        ok, _ = broker_mod.is_interactive_claude_argv(["claude", "mcp", "serve"])
+        self.assertFalse(ok)
 
 
 if __name__ == "__main__":

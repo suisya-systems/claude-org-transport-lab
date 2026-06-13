@@ -1,0 +1,58 @@
+{
+  "ac": "isolation",
+  "argv": [
+    "/home/happy_ryo/.local/bin/claude",
+    "--mcp-config",
+    "/tmp/k1-iso-9c6m47md/mcp-config.json",
+    "--strict-mcp-config",
+    "--dangerously-load-development-channels",
+    "server:org-broker-channel",
+    "--model",
+    "sonnet"
+  ],
+  "pane": "%0",
+  "startup": {
+    "folder_trust": false,
+    "dev_channel_prompt": true,
+    "mcp_approve_prompt": false,
+    "approved_mechanically": true,
+    "ready_seconds": 3.3,
+    "prompt_texts": [
+      {
+        "kind": "dev_channel_prompt",
+        "tail": "────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────\n  WARNING: Loading development channels\n  --dangerously-load-development-channels is for local channel development only. Do not use this option to run channels you have downloaded off the internet.\n  Please use --channels to run a list of approved channels.\n  Channels: server:org-broker-channel\n  ❯ 1. I am using this for local development\n    2. Exit\n  Enter to confirm · Esc to cancel"
+      }
+    ],
+    "idle_settle_frames": 2
+  },
+  "ac1_tool_less_load_and_approve": true,
+  "ac4_billing_neutral": {
+    "real_argv": [
+      "/home/happy_ryo/.local/bin/claude",
+      "--mcp-config",
+      "/tmp/k1-iso-9c6m47md/mcp-config.json",
+      "--strict-mcp-config",
+      "--dangerously-load-development-channels",
+      "server:org-broker-channel",
+      "--model",
+      "sonnet"
+    ],
+    "headless_flags_present": [],
+    "interactive_prompt_rendered": true,
+    "pass": true
+  },
+  "probe": {
+    "base": "b32c12b7",
+    "target": "B32C12B7"
+  },
+  "ac2_idle_wake": {
+    "transform_target_emitted_by_model": true,
+    "target_on_assistant_line": true,
+    "no_input_typed_after_idle": true,
+    "tool_less_no_poll_path": true,
+    "channel_source_rendered": true,
+    "daemon_rows_delivered": 1,
+    "seconds_to_wake": 3.0,
+    "pass": true
+  }
+}

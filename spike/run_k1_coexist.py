@@ -27,13 +27,15 @@ import sys
 import tempfile
 import time
 import urllib.request
-import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from k1_daemon import DaemonServer  # noqa: E402
 from tmux_adapter import TmuxAdapter  # noqa: E402
-from run_k1 import approve_prompts_until_idle, log  # noqa: E402
+from run_k1 import (  # noqa: E402
+    approve_prompts_until_idle, log, make_wake_probe, scan_wake,
+    write_committed_evidence,
+)
 
 sys.stdout.reconfigure(encoding="utf-8")
 
@@ -145,35 +147,40 @@ def run_coexist(model: str, wake_timeout: float) -> dict:
             time.sleep(1.0)
         result["claude_peers_target_registered"] = target is not None
 
-        # --- 2 系へ固有 nonce を push (pane には一切入力しない) ---
-        nonce_a = f"WOKE-OBC-{uuid.uuid4().hex[:6]}"   # org-broker-channel
-        nonce_b = f"WOKE-CP-{uuid.uuid4().hex[:6]}"    # claude-peers
-        result["nonce_a"] = nonce_a
-        result["nonce_b"] = nonce_b
-        log(f"push A via org-broker-channel: {nonce_a}")
-        srv.daemon.enqueue(OWNER, f"Channel A message. Output this token only: {nonce_a}",
+        # --- 2 系へ transform プローブを push (pane には一切入力しない) ---
+        # echo confound 対策: grep 対象は大文字変換後 target（push 本文に存在しない）。
+        # 注入 echo（小文字）では一致せず、モデルが実ターンで変換出力したときのみ一致する。
+        probe_a = make_wake_probe("org-broker-channel")
+        probe_b = make_wake_probe("claude-peers")
+        result["probe_a"] = {"base": probe_a["base"], "target": probe_a["target"]}
+        result["probe_b"] = {"base": probe_b["base"], "target": probe_b["target"]}
+        log(f"push A via org-broker-channel: base={probe_a['base']} target={probe_a['target']}")
+        srv.daemon.enqueue(OWNER, probe_a["content"],
                            {"from_id": "observer-a", "kind": "coexist-a"})
         if target:
-            log(f"push B via claude-peers: {nonce_b}")
+            log(f"push B via claude-peers: base={probe_b['base']} target={probe_b['target']}")
             _peers_post(peers_port, peers_token, "/send-message",
-                        {"from_id": sender, "to_id": target,
-                         "text": f"Channel B message. Output this token only: {nonce_b}"})
+                        {"from_id": sender, "to_id": target, "text": probe_b["content"]})
 
         deadline = time.monotonic() + wake_timeout
         seen_a = seen_b = False
         while time.monotonic() < deadline and not (seen_a and seen_b):
             scr = adapter.get_text(pane.pane_id)
-            seen_a = seen_a or (nonce_a in scr)
-            seen_b = seen_b or (nonce_b in scr)
+            seen_a = seen_a or scan_wake(scr, probe_a["target"])["appeared"]
+            seen_b = seen_b or scan_wake(scr, probe_b["target"])["appeared"]
             time.sleep(1.0)
         after = adapter.get_text(pane.pane_id)
         (evid / "coexist-after.txt").write_text(after, encoding="utf-8")
+        write_committed_evidence("coexist", after, result,
+                                 [probe_a["target"], probe_b["target"]])
 
         result["ac3_coexist"] = {
+            # 両 channel がモデルを実際に起こした（transform 出力で実証）
             "channel_A_org_broker_woke": seen_a,
             "channel_B_claude_peers_woke": seen_b,
-            "both_sources_rendered": ("org-broker-channel" in after
-                                      and "claude-peers" in after),
+            # 非干渉: 両 source が同一セッションに load/inject された（wake とは別の観測）
+            "both_sources_loaded_and_injected": ("org-broker-channel" in after
+                                                 and "claude-peers" in after),
             "neither_blocked": seen_a and seen_b,
             "pass": seen_a and seen_b,
         }
@@ -201,7 +208,7 @@ def run_coexist(model: str, wake_timeout: float) -> dict:
 def main() -> int:
     ap = argparse.ArgumentParser(description="K1 AC-3 coexist gate (two claude/channel servers).")
     ap.add_argument("--model", default="sonnet")
-    ap.add_argument("--wake-timeout", type=float, default=60.0)
+    ap.add_argument("--wake-timeout", type=float, default=90.0)  # 2 系の実ターン分
     args = ap.parse_args()
     res = run_coexist(args.model, args.wake_timeout)
     out_dir = Path("/tmp/claude/broker-k1-spike/coexist/evidence")

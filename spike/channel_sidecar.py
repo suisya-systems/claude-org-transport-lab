@@ -34,9 +34,18 @@ OWNER = os.environ.get("K1_OWNER", "")
 POLL_INTERVAL = float(os.environ.get("K1_POLL_INTERVAL", "1.0"))
 SOURCE_NAME = os.environ.get("K1_SOURCE_NAME", "org-broker-channel")
 LOG_PATH = os.environ.get("K1_SIDECAR_LOG", "")
+# テスト専用 fault injection: "skip-confirm" = emit はするが confirm しない
+# (emit と confirm の間で sidecar が死亡したケースの再現。lease reaping の回復を検証する)
+FAULT = os.environ.get("K1_FAULT", "")
 
 _stdout_lock = threading.Lock()
 _started = threading.Event()
+
+# MCP protocolVersion negotiation（blind mirror を避ける）
+_SUPPORTED_PROTO = frozenset((
+    "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05",
+))
+_DEFAULT_PROTO = "2025-06-18"
 
 
 def _log(msg: str) -> None:
@@ -99,13 +108,24 @@ def _push_loop() -> None:
             rows = res.get("rows", [])
             for row in rows:
                 meta = dict(row.get("meta") or {})
-                # source は dev-channel 登録名から harness が付与する。meta では from_* 等のみ。
+                # source は dev-channel 登録名から harness が付与する。meta では from_* 等 + dedup key。
+                # msg_id = daemon 行 id。emit/confirm 残余 window や epoch flip での再配達を受信側が
+                # 識別できる dedup key（at-least-once + 冪等表示の前提を実体化）。
+                meta["msg_id"] = row["id"]
                 _emit_channel(row["content"], meta)
                 _log(f"emitted row {row['id']} ({len(row['content'])} bytes)")
-                # emit が write を終えた後にのみ確定 (at-least-once + 冪等表示の前提)
+                if FAULT == "skip-confirm":
+                    _log(f"FAULT skip-confirm: not confirming {row['id']} (simulating death)")
+                    continue
+                # 配達確定は emit (stdout flush) の後にのみ。confirm 失敗時は再配達されうるため結果を検査する。
                 conf = _daemon_post("/confirm-delivered",
                                     {"id": row["id"], "epoch": row.get("epoch", -1)})
-                _log(f"confirmed row {row['id']}: {conf}")
+                if conf.get("ok"):
+                    _log(f"confirmed row {row['id']}")
+                else:
+                    # 既に emit 済。stale_epoch (PUSH->PULL flip) 等で行は UNDELIVERED へ戻り pull/次 push で
+                    # 再配達されうる (msg_id で受信側 dedup 可能)。沈黙喪失ではなく重複側に倒れる。
+                    _log(f"WARN confirm not ok for {row['id']}: {conf} (may redeliver; dedup via msg_id)")
         except Exception as exc:    # daemon 一時停止等でクラッシュさせない
             _log(f"poll error: {exc}")
         time.sleep(POLL_INTERVAL)
@@ -118,8 +138,10 @@ def _handle(msg: dict) -> dict | None:
 
     if method == "initialize":
         # tool-less: capabilities に experimental{claude/channel} のみ。tools を宣言しない。
-        proto = (msg.get("params") or {}).get("protocolVersion", "2025-06-18")
-        _log(f"initialize (protocol={proto}) -> declaring tool-less claude/channel")
+        # protocolVersion は blind mirror せず、既知サポート版なら同調・未知なら既定へ negotiate。
+        want = (msg.get("params") or {}).get("protocolVersion", _DEFAULT_PROTO)
+        proto = want if want in _SUPPORTED_PROTO else _DEFAULT_PROTO
+        _log(f"initialize (client={want} -> negotiated={proto}) -> declaring tool-less claude/channel")
         return {
             "jsonrpc": "2.0", "id": mid,
             "result": {
@@ -163,7 +185,12 @@ def main() -> None:
     threading.Thread(target=_push_loop, daemon=True).start()
     _log(f"sidecar up: source={SOURCE_NAME}")
     for raw in sys.stdin.buffer:
-        line = raw.decode("utf-8").strip()
+        try:
+            line = raw.decode("utf-8").strip()
+        except UnicodeDecodeError:
+            # 不正バイトの 1 行で transport を落とさない (channel を維持)
+            _log("bad stdin bytes (skipped)")
+            continue
         if not line:
             continue
         try:
