@@ -266,7 +266,7 @@ Epic #6 D/E で入った **transport descriptor 駆動の生成器**を `ORG_TRA
 
 ### 4.1 単一 SoT（descriptor）
 
-ja 側の transport アクセサ [`tools/transport.py`](../../tools/transport.py) は runtime の transport surface descriptor（`claude_org_runtime.transport`）を唯一の SoT として consume する（ハードコードしない）。解決順は **explicit 引数 > `ORG_TRANSPORT` env > 既定 `renga`**。allowlist 生成は `claude_org_runtime.settings.generator.transport_allowlist(role, transport=...)` 経由。
+ja 側の transport アクセサ `tools/transport.py` は runtime の transport surface descriptor（`claude_org_runtime.transport`）を唯一の SoT として consume する（ハードコードしない）。解決順は **explicit 引数 > `ORG_TRANSPORT` env > 既定 `renga`**。allowlist 生成は `claude_org_runtime.settings.generator.transport_allowlist(role, transport=...)` 経由。
 
 ### 4.2 role 別 allowlist の dry-run
 
@@ -608,7 +608,7 @@ tmux attach -r -t claude-org   # 単一セッション化（§3.4 / R1）後の�
 - 契約: [`docs/contracts/backend-interface-contract.md`](../contracts/backend-interface-contract.md) Surface 8（broker auth & delivery、ratified 2026-06-14）
 - 輸送両系の窓口運用差: [`CLAUDE.md`](../../CLAUDE.md)「輸送層（transport）両系」
 - spawn 儀式（dev-channel 承認 → folder-trust 承認）: [`.dispatcher/references/spawn-flow.md`](../../.dispatcher/references/spawn-flow.md) 3-3b
-- transport アクセサ（ja 側単一シーム）: [`tools/transport.py`](../../tools/transport.py)
+- transport アクセサ（ja 側単一シーム）: `tools/transport.py`
 - user_common allowlist 射影: [`tools/org_setup_prune.py`](../../tools/org_setup_prune.py) `--user-common-allowlist`
 - attention watcher の運用文体: [`attention-watch.md`](attention-watch.md)
 - 観察性の単一セッション化設計（§8.2 の将来形）: transport-lab `docs/design/broker-native-roles.md` §3.4（defect 4 — 独立 tmux セッション問題）
