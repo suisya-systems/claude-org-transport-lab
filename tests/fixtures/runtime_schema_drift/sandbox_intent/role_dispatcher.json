@@ -64,65 +64,25 @@
   },
   "expected_rendered_sandbox": {
     "enabled": true,
-    "failIfUnavailable": false,
     "filesystem": {
       "additionalDirectories": [
         "/home/u/co"
       ],
       "denyRead": [
-        {
-          "anchor": "claude_org_path",
-          "path": "**/credentials*",
-          "suppressOnSymlinkEscape": true
-        },
-        {
-          "anchor": "claude_org_path",
-          "path": "**/*.pem",
-          "suppressOnSymlinkEscape": true
-        },
-        {
-          "anchor": "claude_org_path",
-          "path": ".env",
-          "suppressOnSymlinkEscape": true
-        },
-        {
-          "anchor": "claude_org_path",
-          "path": ".env.*",
-          "suppressOnSymlinkEscape": true
-        }
+        "/home/u/co/**/credentials*",
+        "/home/u/co/**/*.pem",
+        "/home/u/co/.env",
+        "/home/u/co/.env.*"
       ],
       "denyWrite": [
-        {
-          "anchor": "claude_org_path",
-          "path": "tools",
-          "suppressOnSymlinkEscape": true
-        },
-        {
-          "anchor": "claude_org_path",
-          "path": "dashboard",
-          "suppressOnSymlinkEscape": true
-        },
-        {
-          "anchor": "claude_org_path",
-          "path": "tests",
-          "suppressOnSymlinkEscape": true
-        },
-        {
-          "anchor": "claude_org_path",
-          "path": ".claude/skills",
-          "suppressOnSymlinkEscape": true
-        },
-        {
-          "anchor": "claude_org_path",
-          "path": "docs",
-          "suppressOnSymlinkEscape": true
-        },
-        {
-          "anchor": "claude_org_path",
-          "path": "registry",
-          "suppressOnSymlinkEscape": true
-        }
+        "/home/u/co/tools",
+        "/home/u/co/dashboard",
+        "/home/u/co/tests",
+        "/home/u/co/.claude/skills",
+        "/home/u/co/docs",
+        "/home/u/co/registry"
       ]
-    }
+    },
+    "failIfUnavailable": false
   }
 }

@@ -27,7 +27,7 @@ classifiers = [
 # pre-1.0; widening is Phase 5e+ scope per CLAUDE.local.md.
 dependencies = [
     "core-harness>=0.3.2,<0.4",
-    "claude-org-runtime>=0.1.9,<0.2",
+    "claude-org-runtime>=0.1.30,<0.2",
     "tomli>=2.0,<3 ; python_version < '3.11'",
 ]
 

@@ -26,7 +26,14 @@ core-harness>=0.3.2,<0.4
 # PyPI via Trusted Publisher; pinned to the 0.1.x range. 0.x bumps may be
 # breaking per the runtime's compatibility policy, so widen this pin
 # deliberately when adopting a new minor.
-claude-org-runtime>=0.1.9,<0.2
+# Floor bumped to 0.1.30 to match the sandbox output normalization: 0.1.30
+# renders sandbox denyRead/denyWrite as resolved string arrays (was structured
+# dict entries carrying anchor/suppressOnSymlinkEscape/layer2Fallback). The
+# semantic-drift goldens under tests/fixtures/runtime_schema_drift/sandbox_intent/
+# were regenerated for the string shape, so a <0.1.30 install renders the old
+# dict shape and fails FixtureExplainGoldenTest; exclude it from the floor
+# (upper bound stays <0.2). Keep in sync with pyproject.toml.
+claude-org-runtime>=0.1.30,<0.2
 
 # tools/gen_worker_brief.py reads TOML config. tomllib is stdlib in 3.11+,
 # but ja still supports 3.10 (CLAUDE.local.md template recommends 3.10).
