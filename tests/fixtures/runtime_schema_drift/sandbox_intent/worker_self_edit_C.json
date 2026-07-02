@@ -67,30 +67,10 @@
     "filesystem": {
       "additionalDirectories": [],
       "denyRead": [
-        {
-          "anchor": "worker_dir",
-          "path": ".env",
-          "suppressOnSymlinkEscape": true,
-          "layer2Fallback": "Read(.env)"
-        },
-        {
-          "anchor": "worker_dir",
-          "path": ".env.*",
-          "suppressOnSymlinkEscape": true,
-          "layer2Fallback": "Read(.env.*)"
-        },
-        {
-          "anchor": "worker_dir",
-          "path": "**/credentials*",
-          "suppressOnSymlinkEscape": true,
-          "layer2Fallback": "Read(**/credentials*)"
-        },
-        {
-          "anchor": "worker_dir",
-          "path": "**/*.pem",
-          "suppressOnSymlinkEscape": true,
-          "layer2Fallback": "Read(**/*.pem)"
-        }
+        "/home/u/co/.env",
+        "/home/u/co/.env.*",
+        "/home/u/co/**/credentials*",
+        "/home/u/co/**/*.pem"
       ],
       "denyWrite": []
     },

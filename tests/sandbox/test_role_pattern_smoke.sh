@@ -177,7 +177,7 @@ fi
 # `claude-org-runtime settings generate`. The CLI is what the runbook §1.2
 # instructs.
 #
-# We try the project venv first, then PATH. We accept any 0.1.x ≥0.1.9
+# We try the project venv first, then PATH. We accept any 0.1.x ≥0.1.30
 # (the requirements.txt pin window). Older or out-of-window versions
 # skip the assertion rather than fail because the schema / hook tests
 # below do not depend on the runtime; the row exists to surface
@@ -215,18 +215,18 @@ if [[ -z "$runtime_version" ]]; then
   done
 fi
 if [[ -z "$runtime_version" ]]; then
-  skip_msg "claude-org-runtime not installed — cannot verify >=0.1.9,<0.2 pin (runbook §1.2)"
+  skip_msg "claude-org-runtime not installed — cannot verify >=0.1.30,<0.2 pin (runbook §1.2)"
 else
-  # Compare 0.1.X >= 0.1.9 numerically. We only need to detect "below
-  # 0.1.9" or "outside 0.1.x" since the requirements.txt pin window is
+  # Compare 0.1.X >= 0.1.30 numerically. We only need to detect "below
+  # 0.1.30" or "outside 0.1.x" since the requirements.txt pin window is
   # narrow. Anything in 0.2.x is also out-of-window.
   major=$(echo "$runtime_version" | awk -F. '{print $1+0}')
   minor=$(echo "$runtime_version" | awk -F. '{print $2+0}')
   patch=$(echo "$runtime_version" | awk -F. '{print $3+0}')
-  if [[ "$major" -eq 0 && "$minor" -eq 1 && "$patch" -ge 9 ]]; then
-    ok "claude-org-runtime $runtime_version satisfies >=0.1.9,<0.2 (source: $runtime_version_src)"
+  if [[ "$major" -eq 0 && "$minor" -eq 1 && "$patch" -ge 30 ]]; then
+    ok "claude-org-runtime $runtime_version satisfies >=0.1.30,<0.2 (source: $runtime_version_src)"
   else
-    skip_msg "claude-org-runtime $runtime_version is outside the >=0.1.9,<0.2 pin (source: $runtime_version_src) — sandbox_by_pattern may not be emitted into worker settings (runbook §1.2)"
+    skip_msg "claude-org-runtime $runtime_version is outside the >=0.1.30,<0.2 pin (source: $runtime_version_src) — sandbox_by_pattern may not be emitted into worker settings (runbook §1.2)"
   fi
 fi
 

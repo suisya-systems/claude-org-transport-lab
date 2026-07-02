@@ -96,57 +96,17 @@
         "/home/u/workers/proj/.git/packed-refs"
       ],
       "denyRead": [
-        {
-          "anchor": "worker_dir",
-          "path": ".env",
-          "suppressOnSymlinkEscape": true,
-          "layer2Fallback": "Read(.env)"
-        },
-        {
-          "anchor": "worker_dir",
-          "path": ".env.*",
-          "suppressOnSymlinkEscape": true,
-          "layer2Fallback": "Read(.env.*)"
-        },
-        {
-          "anchor": "worker_dir",
-          "path": "**/credentials*",
-          "suppressOnSymlinkEscape": true,
-          "layer2Fallback": "Read(**/credentials*)"
-        },
-        {
-          "anchor": "worker_dir",
-          "path": "**/*.pem",
-          "suppressOnSymlinkEscape": true,
-          "layer2Fallback": "Read(**/*.pem)"
-        }
+        "/home/u/workers/proj/.worktrees/T123/.env",
+        "/home/u/workers/proj/.worktrees/T123/.env.*",
+        "/home/u/workers/proj/.worktrees/T123/**/credentials*",
+        "/home/u/workers/proj/.worktrees/T123/**/*.pem"
       ],
       "denyWrite": [
-        {
-          "anchor": "worker_dir",
-          "path": "**",
-          "suppressOnSymlinkEscape": false
-        },
-        {
-          "anchor": "base_clone",
-          "path": ".git/worktrees/T123/**",
-          "suppressOnSymlinkEscape": false
-        },
-        {
-          "anchor": "base_clone",
-          "path": ".git/objects/**",
-          "suppressOnSymlinkEscape": false
-        },
-        {
-          "anchor": "base_clone",
-          "path": ".git/refs/heads/feat/audit",
-          "suppressOnSymlinkEscape": false
-        },
-        {
-          "anchor": "base_clone",
-          "path": ".git/packed-refs",
-          "suppressOnSymlinkEscape": false
-        }
+        "/home/u/workers/proj/.worktrees/T123/**",
+        "/home/u/workers/proj/.git/worktrees/T123/**",
+        "/home/u/workers/proj/.git/objects/**",
+        "/home/u/workers/proj/.git/refs/heads/feat/audit",
+        "/home/u/workers/proj/.git/packed-refs"
       ]
     },
     "failIfUnavailable": false

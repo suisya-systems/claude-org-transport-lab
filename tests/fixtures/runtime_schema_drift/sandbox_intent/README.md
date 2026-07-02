@@ -52,6 +52,17 @@ suppression evaluator on top of identical schema bytes.
 }
 ```
 
+As of `claude-org-runtime` 0.1.30 the rendered `filesystem.denyRead` /
+`denyWrite` arrays are **resolved absolute-path strings** (anchor +
+realpath applied), not the structured
+`{anchor, path, suppressOnSymlinkEscape, layer2Fallback}` dicts that the
+schema *input* carries. The structured metadata (including
+`layer2Fallback`) is retained only on the explain JSON's suppression
+records — see the `layer2Fallback` note below. Fixtures written for
+runtimes before 0.1.30 carried the dict shape in
+`expected_rendered_sandbox` and must be regenerated for 0.1.30+ (see
+"Bulk-updating fixtures for a new runtime version").
+
 `realpath_map` rules apply to a path `p` when `p == prefix` or
 `p.startswith(prefix + "/")`. The matched prefix is replaced and the
 result is returned. Paths that match no rule pass through unchanged.
@@ -167,3 +178,44 @@ file.
 3. The pytest companion at
    [`tests/test_runtime_schema_drift_semantic.py`](../../../test_runtime_schema_drift_semantic.py)
    discovers fixtures by glob, so no test wiring is needed.
+
+## Bulk-updating fixtures for a new runtime version
+
+When `claude-org-runtime` ships a new release whose
+`render_role_with_metadata()` changes the *shape* of the rendered
+explain / sandbox JSON (e.g. 0.1.30's denyRead/denyWrite dict -> resolved
+string normalization), every `expected_explain` /
+`expected_rendered_sandbox` golden here goes red at once. Do **not**
+blindly overwrite the goldens with the new runtime's raw output — a
+schema regression would be laundered into the fixtures silently. Follow
+this procedure:
+
+1. **Confirm the installed runtime version** you are adopting:
+   `python -c "from importlib.metadata import version; print(version('claude-org-runtime'))"`.
+   This is the version the goldens will be pinned to.
+2. **Semantic-diff review first.** Run
+   `python -m pytest tests/test_runtime_schema_drift_semantic.py -q` (or
+   `python tools/check_runtime_schema_drift.py --semantic`) and read the
+   printed `expected` vs `actual` diff for each fixture. Classify every
+   change as an *intended* schema/evaluator change (documented in the
+   runtime release notes / changelog) or an *unexpected* regression.
+   Only proceed if all diffs are intended. Record the vocabulary of the
+   change (which keys moved / restructured) for the PR description.
+3. **Regenerate or incorporate.** This repo is an experimental fork of
+   `claude-org-ja`; if ja already carries the same fixtures updated for
+   the target runtime, prefer a selective incorporation of ja's
+   fixture-regen commit (verify each local fixture is byte-identical to
+   ja's pre-regen version first, so no fork-local change is machine-
+   overwritten) over a from-scratch regeneration. Regenerate from the
+   live runtime only when incorporation does not apply cleanly.
+4. **Bump the pin floor to match.** The regenerated goldens are only
+   valid at `>= <target version>`; bump the floor in `pyproject.toml`,
+   `requirements.txt`, and `RUNTIME_PIN_LOWER_INCLUSIVE` in
+   [`tools/check_runtime_schema_drift.py`](../../../../tools/check_runtime_schema_drift.py)
+   (and any smoke-test floor that mirrors the pin) so a below-floor
+   install can't render the old shape and fail these tests. Leave the
+   upper bound (`<0.2`) alone unless a separate decision widens it.
+5. **Byte + semantic + test.** Re-run
+   `python tools/check_runtime_schema_drift.py --byte --semantic` and
+   `python -m pytest tests/test_runtime_schema_drift_semantic.py` and
+   confirm both are green before committing.

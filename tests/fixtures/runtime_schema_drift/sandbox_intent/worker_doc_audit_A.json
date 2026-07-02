@@ -73,37 +73,13 @@
         "/home/u/work/wd/.claude/plans"
       ],
       "denyRead": [
-        {
-          "anchor": "worker_dir",
-          "path": ".env",
-          "suppressOnSymlinkEscape": true,
-          "layer2Fallback": "Read(.env)"
-        },
-        {
-          "anchor": "worker_dir",
-          "path": ".env.*",
-          "suppressOnSymlinkEscape": true,
-          "layer2Fallback": "Read(.env.*)"
-        },
-        {
-          "anchor": "worker_dir",
-          "path": "**/credentials*",
-          "suppressOnSymlinkEscape": true,
-          "layer2Fallback": "Read(**/credentials*)"
-        },
-        {
-          "anchor": "worker_dir",
-          "path": "**/*.pem",
-          "suppressOnSymlinkEscape": true,
-          "layer2Fallback": "Read(**/*.pem)"
-        }
+        "/home/u/work/wd/.env",
+        "/home/u/work/wd/.env.*",
+        "/home/u/work/wd/**/credentials*",
+        "/home/u/work/wd/**/*.pem"
       ],
       "denyWrite": [
-        {
-          "anchor": "worker_dir",
-          "path": "**",
-          "suppressOnSymlinkEscape": false
-        }
+        "/home/u/work/wd/**"
       ]
     },
     "failIfUnavailable": false
