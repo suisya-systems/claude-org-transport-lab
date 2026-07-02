@@ -151,38 +151,18 @@
   },
   "expected_rendered_sandbox": {
     "enabled": true,
-    "failIfUnavailable": false,
     "filesystem": {
       "additionalDirectories": [
         "/home/u/co/knowledge"
       ],
       "denyRead": [
-        {
-          "anchor": "worker_dir",
-          "path": ".env",
-          "suppressOnSymlinkEscape": true,
-          "layer2Fallback": "Read(.env)"
-        },
-        {
-          "anchor": "worker_dir",
-          "path": ".env.*",
-          "suppressOnSymlinkEscape": true,
-          "layer2Fallback": "Read(.env.*)"
-        },
-        {
-          "anchor": "worker_dir",
-          "path": "**/credentials*",
-          "suppressOnSymlinkEscape": true,
-          "layer2Fallback": "Read(**/credentials*)"
-        },
-        {
-          "anchor": "worker_dir",
-          "path": "**/*.pem",
-          "suppressOnSymlinkEscape": true,
-          "layer2Fallback": "Read(**/*.pem)"
-        }
+        "/home/u/co/.curator/.env",
+        "/home/u/co/.curator/.env.*",
+        "/home/u/co/.curator/**/credentials*",
+        "/home/u/co/.curator/**/*.pem"
       ],
       "denyWrite": []
-    }
+    },
+    "failIfUnavailable": false
   }
 }

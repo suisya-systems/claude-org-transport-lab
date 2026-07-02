@@ -96,30 +96,10 @@
         "/home/u/co/knowledge/raw"
       ],
       "denyRead": [
-        {
-          "anchor": "worker_dir",
-          "path": ".env",
-          "suppressOnSymlinkEscape": true,
-          "layer2Fallback": "Read(.env)"
-        },
-        {
-          "anchor": "worker_dir",
-          "path": ".env.*",
-          "suppressOnSymlinkEscape": true,
-          "layer2Fallback": "Read(.env.*)"
-        },
-        {
-          "anchor": "worker_dir",
-          "path": "**/credentials*",
-          "suppressOnSymlinkEscape": true,
-          "layer2Fallback": "Read(**/credentials*)"
-        },
-        {
-          "anchor": "worker_dir",
-          "path": "**/*.pem",
-          "suppressOnSymlinkEscape": true,
-          "layer2Fallback": "Read(**/*.pem)"
-        }
+        "/home/u/workers/proj/.worktrees/T123/.env",
+        "/home/u/workers/proj/.worktrees/T123/.env.*",
+        "/home/u/workers/proj/.worktrees/T123/**/credentials*",
+        "/home/u/workers/proj/.worktrees/T123/**/*.pem"
       ],
       "denyWrite": []
     },
