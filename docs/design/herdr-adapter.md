@@ -150,7 +150,9 @@ Herdr は WezTerm / tmux より**有利**（ネイティブのイベントスト
 | Set D Surface 4 | 要求 | Herdr | 充足 |
 |---|---|---|---|
 | 4.1 numeric id + stable name | 両識別子。全桁数字文字列は id 解釈 | Herdr は `pane_id`（native handle）+ `label`（一意制約なし） | △ — native id ↔ broker handle 対応 + name は registry。全桁数字禁止は registry 検証 |
-| 4.2 single-tab MUST | 全 pane-addressed op が現タブのみ解決（Q10） | Herdr は workspace / tab / pane 階層を持ち、`pane.list` に `tab_id` フィルタ | △ — adapter が **単一 tab スコープを強制**（`tab.create` を orchestrator 用に使わず、全 pane を単一 tab に spawn）。renga/WezTerm/tmux と同型 |
+| 4.2 single-tab MUST | 全 pane-addressed op が現タブのみ解決（Q10） | Herdr は workspace / tab / pane 階層を持ち、`pane.list` に `tab_id` フィルタ | △ — adapter が **単一 tab スコープを強制**（`tab.create` を orchestrator 用に使わず、全 pane を単一 tab に spawn）。renga/WezTerm/tmux と同型。**（レイアウト拡張）** multi-workspace レイアウトでは解決スコープを「単一 tab」から「org 所有 workspace 集合（現世代）」へ拡張する。[`docs/design/herdr-workspace-layout.md`](./herdr-workspace-layout.md) §4（集合化）/ §10（single-tab MUST 再解釈）を参照 |
+
+> **レイアウト拡張の注記（Refs #110 / #114）**: 本書 §3.4 / §4.2 が前提とする「専用 workspace 1 つで隔離（`isolated_session=True`、全 pane を単一 tab に spawn）」は、[`docs/design/herdr-workspace-layout.md`](./herdr-workspace-layout.md) が **control 面 1 スペース + プロジェクト単位ワーカースペース**へ拡張・supersede する。加えて runtime Issue #114 の実測で **Herdr `agent.start` は `workspace` / `tab` を尊重せず focused workspace に相乗り配置する**ことが判明しており、「専用 workspace で隔離」前提はそのままでは成立しない。詳細と対処（isolation 境界の集合化 / spawn 時 space 選択の層 / 世代識別 / 配置戦略 / degrade）は herdr-workspace-layout.md を参照。
 
 ### 3.5 Surface 2（Messaging）↔ Herdr — **非対応（broker 継続）**
 
